@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: Apache-2.0
+# SynapticOS Kconfig
+
+menuconfig SYNAPTIC
+    bool "SynapticOS AI Runtime"
+    depends on SOC_SERIES_MCXNX4X || BOARD_QEMU_CORTEX_M3
+    help
+      Enable the SynapticOS AI-native runtime for inference
+      scheduling, tensor memory management, and NPU orchestration.
+
+if SYNAPTIC
+
+config SYNAPTIC_TENSOR_ARENA_SIZE
+    int "Tensor arena size in bytes"
+    default 131072
+    range 4096 524288
+    help
+      Size of the SRAM region dedicated to tensor allocations.
+      Default 128 KB. Adjust based on model requirements.
+
+config SYNAPTIC_SCRATCH_POOL_SIZE
+    int "Scratch pool size in bytes"
+    default 16384
+    range 1024 65536
+    help
+      Size of the reusable scratch buffer pool for per-layer
+      intermediate computations.
+
+config SYNAPTIC_MAX_MODELS
+    int "Maximum number of registered models"
+    default 4
+    range 1 16
+    help
+      Maximum number of models that can be registered in the
+      model registry simultaneously.
+
+config SYNAPTIC_MAX_CONCURRENT_JOBS
+    int "Maximum concurrent inference jobs"
+    default 2
+    range 1 4
+    help
+      Maximum number of inference jobs that can be queued
+      or running concurrently.
+
+config SYNAPTIC_MAX_PIPELINE_STAGES
+    int "Maximum stages per inference pipeline"
+    default 8
+    range 4 16
+    help
+      Maximum number of stages (preprocess + model + postprocess)
+      in a single inference pipeline.
+
+config SYNAPTIC_PROFILING
+    bool "Enable inference profiling"
+    default y if DEBUG
+    help
+      Enable per-inference profiling of execution time, memory
+      usage, and NPU utilization. Zero overhead when disabled.
+
+config SYNAPTIC_OTA
+    bool "Enable OTA model updates"
+    depends on FLASH
+    default y
+    help
+      Enable over-the-air model update support using dual-bank
+      flash with A/B slot management.
+
+config SYNAPTIC_DUAL_CORE
+    bool "Enable dual-core operation"
+    depends on SECOND_CORE_MCUX
+    default y
+    help
+      Enable asymmetric dual-core operation where CPU0 runs the
+      AI runtime and CPU1 runs the application.
+
+config SYNAPTIC_IPC_RING_SIZE
+    int "IPC ring buffer entry count"
+    default 16
+    range 4 64
+    depends on SYNAPTIC_DUAL_CORE
+    help
+      Number of entries in the inter-core IPC ring buffer.
+
+config SYNAPTIC_SHARED_REGION_SIZE
+    int "Shared memory region size in bytes"
+    default 98304
+    depends on SYNAPTIC_DUAL_CORE
+    help
+      Size of the shared SRAM region for IPC and tensor exchange
+      between CPU0 and CPU1. Default 96 KB.
+
+config SYNAPTIC_SHELL
+    bool "Enable SynapticOS shell commands"
+    depends on SHELL
+    default y
+    help
+      Add shell commands for model management, profiling,
+      and runtime inspection.
+
+config SYNAPTIC_LOG_LEVEL
+    int "SynapticOS log level"
+    default 3
+    range 0 4
+    help
+      0=OFF, 1=ERR, 2=WRN, 3=INF, 4=DBG
+
+endif # SYNAPTIC

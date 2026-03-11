@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+twister-out*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Zephyr SDK
+.west/
+
+# Binary models (track with Git LFS or download)
+*.tflite
+*.synm
+!models/README.md
+
+# Internal docs (keep only public-facing docs)
+docs/*
+!docs/01-ubuntu-setup.md
+!docs/02-project-setup.md
+!docs/architecture.md

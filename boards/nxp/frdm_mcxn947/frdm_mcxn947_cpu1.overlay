@@ -1,0 +1,15 @@
+/*
+ * SynapticOS Device Tree Overlay — CPU1 (Application Core)
+ */
+
+/ {
+    chosen {
+        zephyr,console = &flexcomm4_lpuart4;
+    };
+
+    /* Reference same shared memory region */
+    syn_shared_mem: memory@20040000 {
+        compatible = "mmio-sram";
+        reg = <0x20040000 0x18000>;
+    };
+};
