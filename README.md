@@ -1,18 +1,21 @@
 <p align="center">
-  <h1 align="center">SynapticOS</h1>
-  <p align="center">
-    <strong>AI-Native Operating System for Microcontrollers</strong>
-  </p>
-  <p align="center">
-    Inference-first runtime for resource-constrained edge devices.<br/>
-    Built on <a href="https://zephyrproject.org">Zephyr RTOS</a>. Designed for the <a href="https://www.nxp.com/design/design-center/development-boards-and-designs/general-purpose-mcus/frdm-development-board-for-mcx-n94-n54-mcus:FRDM-MCXN947">NXP FRDM-MCXN947</a>.
-  </p>
-  <p align="center">
-    <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/badge/version-0.1.0-blue?style=flat-square" alt="Version"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square" alt="License"></a>
-    <a href="#roadmap"><img src="https://img.shields.io/badge/phase-1%20of%206-orange?style=flat-square" alt="Phase"></a>
-    <a href="#test-suite"><img src="https://img.shields.io/badge/tests-50%20passed-brightgreen?style=flat-square" alt="Tests"></a>
-  </p>
+  <img src="assets/synapticOS_logo.png" alt="SynapticOS" width="420">
+</p>
+
+<p align="center">
+  <strong>AI-Native Operating System for Microcontrollers</strong>
+</p>
+
+<p align="center">
+  Inference-first runtime for resource-constrained edge devices.<br/>
+  Built on <a href="https://zephyrproject.org">Zephyr RTOS</a>. Designed for the <a href="https://www.nxp.com/design/design-center/development-boards-and-designs/general-purpose-mcus/frdm-development-board-for-mcx-n94-n54-mcus:FRDM-MCXN947">NXP FRDM-MCXN947</a>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/badge/version-0.1.0-blue?style=flat-square" alt="Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square" alt="License"></a>
+  <a href="#roadmap"><img src="https://img.shields.io/badge/phase-1%20of%206-orange?style=flat-square" alt="Phase"></a>
+  <a href="#test-suite"><img src="https://img.shields.io/badge/tests-61%20passed-brightgreen?style=flat-square" alt="Tests"></a>
 </p>
 
 ---
@@ -122,14 +125,14 @@ west flash
 
 ```bash
 west twister -T synaptic-os/tests/unit -p qemu_cortex_m3
-# 50 tests, 7 suites, 100% pass rate
+# 61 tests, 10 suites, 100% pass rate
 ```
 
 ## Build Footprint
 
 | Target | Flash | RAM |
 |--------|-------|-----|
-| FRDM-MCXN947 | 64 KB | 183 KB |
+| FRDM-MCXN947 | 65 KB | 180 KB |
 | QEMU Cortex-M3 | 24 KB | 27 KB |
 
 ## Project Structure
@@ -146,7 +149,7 @@ synaptic-os/
 │   └── postprocess/        Classification, detection output processing
 ├── samples/
 │   └── hello_inference/    End-to-end inference demo
-├── tests/unit/             50 unit tests across 7 suites
+├── tests/unit/             61 unit tests across 10 suites
 ├── boards/nxp/             Device tree overlays and board configs
 ├── scripts/                Environment setup and validation
 └── docs/                   Guides and specifications
