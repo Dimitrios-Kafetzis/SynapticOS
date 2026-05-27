@@ -51,7 +51,7 @@ int syn_init(void)
 	/* Step 3: DSP HAL (non-critical) */
 	ret = syn_hal_dsp_init();
 	if (ret != 0) {
-		LOG_WRN("DSP init failed: %d — continuing without DSP acceleration", ret);
+		LOG_WRN("DSP init failed: %d - continuing without DSP acceleration", ret);
 	}
 
 	/* Step 4: Profiling */
