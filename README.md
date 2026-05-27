@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/badge/version-0.1.0-blue?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/github/v/release/Dimitrios-Kafetzis/SynapticOS?style=flat-square&color=blue" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square" alt="License"></a>
   <a href="#roadmap"><img src="https://img.shields.io/badge/phase-1%20of%206-orange?style=flat-square" alt="Phase"></a>
   <a href="#test-suite"><img src="https://img.shields.io/badge/tests-61%20passed-brightgreen?style=flat-square" alt="Tests"></a>
