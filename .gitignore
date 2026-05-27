@@ -32,3 +32,6 @@ docs/*
 !docs/01-ubuntu-setup.md
 !docs/02-project-setup.md
 !docs/architecture.md
+
+# Community engagement (local only, not part of public repo)
+community/
