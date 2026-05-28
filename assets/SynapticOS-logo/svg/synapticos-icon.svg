@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><defs>
+    <linearGradient id="gMark" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2F6BFF"/><stop offset="1" stop-color="#17C9C0"/></linearGradient>
+    <linearGradient id="gPulse" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9FFBEE"/><stop offset="1" stop-color="#17C9C0"/></linearGradient>
+    <linearGradient id="gWord" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2F6BFF"/><stop offset="1" stop-color="#17C9C0"/></linearGradient>
+  </defs><g transform="translate(6,6) scale(0.953125)"><rect x="56" y="56" width="144" height="144" rx="34" fill="none" stroke="url(#gMark)" stroke-width="11"/>
+    <rect x="34" y="88.5" width="22" height="15" rx="5" fill="url(#gMark)"/>
+    <rect x="200" y="88.5" width="22" height="15" rx="5" fill="url(#gMark)"/>
+    <rect x="34" y="120.5" width="22" height="15" rx="5" fill="url(#gMark)"/>
+    <rect x="200" y="120.5" width="22" height="15" rx="5" fill="url(#gMark)"/>
+    <rect x="34" y="152.5" width="22" height="15" rx="5" fill="url(#gMark)"/>
+    <rect x="200" y="152.5" width="22" height="15" rx="5" fill="url(#gMark)"/>
+    <rect x="88.5" y="34" width="15" height="22" rx="5" fill="url(#gMark)"/>
+    <rect x="88.5" y="200" width="15" height="22" rx="5" fill="url(#gMark)"/>
+    <rect x="120.5" y="34" width="15" height="22" rx="5" fill="url(#gMark)"/>
+    <rect x="120.5" y="200" width="15" height="22" rx="5" fill="url(#gMark)"/>
+    <rect x="152.5" y="34" width="15" height="22" rx="5" fill="url(#gMark)"/>
+    <rect x="152.5" y="200" width="15" height="22" rx="5" fill="url(#gMark)"/>
+    <circle cx="95" cy="95" r="15" fill="url(#gMark)"/><circle cx="161" cy="161" r="15" fill="url(#gMark)"/>
+    <path d="M95,95 C 150,108 106,148 161,161" fill="none" stroke="url(#gPulse)" stroke-width="14" stroke-linecap="round"/>
+    <circle cx="128" cy="128" r="11" fill="#9FFBEE"/><circle cx="128" cy="128" r="5.5" fill="#E9FFFB"/></g></svg>
