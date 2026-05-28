@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/synapticOS_logo.png" alt="SynapticOS" width="420">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/SynapticOS-logo/svg/synapticos-horizontal-dark.svg">
+    <img src="assets/SynapticOS-logo/svg/synapticos-horizontal-light.svg" alt="SynapticOS" width="480">
+  </picture>
 </p>
 
 <p align="center">
