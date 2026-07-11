@@ -10,6 +10,7 @@ target_sources(app PRIVATE
     test_model_registry.c
     test_scheduler.c
     test_infer_pipeline.c
+    test_process.c
     test_ipc.c
     test_npu_hal.c
     test_dsp_hal.c
