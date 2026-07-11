@@ -115,16 +115,21 @@ ZTEST(syn_dsp_suite, test_argmax_null)
     zassert_equal(syn_hal_dsp_argmax(data, 0, &idx), -EINVAL, "");
 }
 
-ZTEST(syn_dsp_suite, test_fft_not_supported)
+ZTEST(syn_dsp_suite, test_fft_supported)
 {
-    float in[4] = {0}, out[4] = {0};
-    zassert_equal(syn_hal_dsp_fft_f32(in, out, 4), -ENOTSUP,
-                  "FFT should return -ENOTSUP");
+    /* Implemented in Phase 2: complex input needs 2*len floats */
+    float in[8] = {0}, out[8] = {0};
+
+    in[0] = 1.0f;
+    zassert_equal(syn_hal_dsp_fft_f32(in, out, 4), 0,
+                  "FFT should succeed");
 }
 
-ZTEST(syn_dsp_suite, test_mat_mult_not_supported)
+ZTEST(syn_dsp_suite, test_mat_mult_supported)
 {
-    int16_t a[4] = {0}, b[4] = {0}, out[4] = {0};
-    zassert_equal(syn_hal_dsp_mat_mult_q15(a, b, out, 2, 2), -ENOTSUP,
-                  "Mat mult should return -ENOTSUP");
+    /* Implemented in Phase 2: b is a cols-length vector */
+    int16_t a[4] = {0}, b[2] = {0}, out[2] = {0};
+
+    zassert_equal(syn_hal_dsp_mat_mult_q15(a, b, out, 2, 2), 0,
+                  "Mat mult should succeed");
 }

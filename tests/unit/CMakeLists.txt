@@ -14,6 +14,7 @@ target_sources(app PRIVATE
     test_npu_hal.c
     test_dsp_hal.c
     test_dsp_verify.c
+    test_dsp_fft.c
     test_init.c
 )
 
