@@ -34,6 +34,7 @@
 LOG_MODULE_REGISTER(syn_infer, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #include <synaptic/syn_infer.h>
+#include <synaptic/syn_process.h>
 #include <synaptic/syn_hal_npu.h>
 #include <string.h>
 
@@ -314,6 +315,63 @@ void syn_pipeline_destroy(syn_pipeline_t *pipe)
 /* Pipeline execution                                                  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Exact output size for the built-in processors, computed from the
+ * stage config and the runtime input tensor. Returns 0 for custom
+ * (unknown) stage functions, which then fall back to the generic
+ * 4x worst-case heuristic.
+ */
+static size_t builtin_stage_capacity(const struct pipeline_stage *s,
+				     const syn_tensor_t *in)
+{
+	if (s->type == STAGE_PREPROCESS) {
+		syn_preprocess_fn_t fn = s->fn.pre;
+
+		if (fn == syn_preprocess_image_resize && s->config != NULL) {
+			const syn_resize_config_t *c = s->config;
+			uint32_t ch = (in->ndim == 4) ? in->shape[3] : 1;
+
+			return (size_t)c->w * c->h * ch;
+		}
+		if (fn == syn_preprocess_image_normalize) {
+			return in->size * sizeof(float);
+		}
+		if (fn == syn_preprocess_quantize_int8) {
+			return in->size / sizeof(float);
+		}
+		if (fn == syn_preprocess_audio_mfcc && s->config != NULL) {
+			const syn_mfcc_config_t *c = s->config;
+			size_t frames = (in->size / sizeof(float)) /
+					c->frame_len;
+
+			return frames * c->num_coeffs * sizeof(float);
+		}
+	} else if (s->type == STAGE_POSTPROCESS) {
+		syn_postprocess_fn_t fn = s->fn.post;
+
+		if (fn == syn_postprocess_softmax) {
+			return (in->dtype == SYN_NPU_DTYPE_FLOAT32) ?
+				in->size : in->size * sizeof(float);
+		}
+		if (fn == syn_postprocess_argmax) {
+			return sizeof(syn_classification_t);
+		}
+		if (fn == syn_postprocess_top_k && s->config != NULL) {
+			const syn_topk_config_t *c = s->config;
+
+			return (size_t)c->k * sizeof(syn_classification_t);
+		}
+		if (fn == syn_postprocess_nms) {
+			return in->size;
+		}
+		if (fn == syn_postprocess_dequantize) {
+			return in->size * sizeof(float);
+		}
+	}
+
+	return 0;
+}
+
 /** Allocate an ephemeral stage output tensor with the given capacity. */
 static syn_tensor_t *alloc_stage_output(size_t capacity)
 {
@@ -388,7 +446,11 @@ static int execute_pipeline(struct infer_job *job)
 
 		switch (s->type) {
 		case STAGE_PREPROCESS: {
-			size_t cap = stage_capacity(cur->size);
+			size_t cap = builtin_stage_capacity(s, cur);
+
+			if (cap == 0) {
+				cap = stage_capacity(cur->size);
+			}
 
 			/* The stage feeding the model must be able to hold
 			 * a full model input.
@@ -414,13 +476,20 @@ static int execute_pipeline(struct infer_job *job)
 			syn_prof_mark_npu_done();
 			npu_marked = true;
 			break;
-		case STAGE_POSTPROCESS:
-			out = alloc_stage_output(stage_capacity(cur->size));
+		case STAGE_POSTPROCESS: {
+			size_t cap = builtin_stage_capacity(s, cur);
+
+			if (cap == 0) {
+				cap = stage_capacity(cur->size);
+			}
+
+			out = alloc_stage_output(cap);
 			if (out == NULL) {
 				return -ENOMEM;
 			}
 			ret = s->fn.post(cur, out, s->config);
 			break;
+		}
 		}
 
 		if (ret != 0) {
