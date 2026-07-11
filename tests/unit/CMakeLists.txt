@@ -9,10 +9,13 @@ target_sources(app PRIVATE
     test_mem_regions.c
     test_model_registry.c
     test_scheduler.c
+    test_infer_pipeline.c
+    test_process.c
     test_ipc.c
     test_npu_hal.c
     test_dsp_hal.c
     test_dsp_verify.c
+    test_dsp_fft.c
     test_init.c
 )
 

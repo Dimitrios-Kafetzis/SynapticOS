@@ -90,34 +90,30 @@ int main(void)
 		data[i] = (uint8_t)(i & 0xFF);
 	}
 
-	/* 6. Run inference */
-	ret = syn_hal_npu_set_input(0, input->data, input->size);
-	if (ret != 0) {
-		LOG_ERR("Set input failed: %d", ret);
-		return ret;
-	}
+	/* 6. Run inference through the scheduler (Phase 2): profiling
+	 * marks fire at the stage boundaries, so 'syn prof last' has
+	 * real data afterwards.
+	 */
+	int8_t output_buf[256];
+	syn_tensor_t output = {
+		.data = output_buf,
+		.size = sizeof(output_buf),
+	};
 
 	uint32_t start = k_cycle_get_32();
 
-	ret = syn_hal_npu_invoke();
+	ret = syn_infer_run_sync(handle, input, &output,
+				 SYN_PRIORITY_NORMAL);
 
 	uint32_t elapsed_us = k_cyc_to_us_ceil32(k_cycle_get_32() - start);
 
 	if (ret != 0) {
-		LOG_ERR("Invoke failed: %d", ret);
+		LOG_ERR("Inference failed: %d", ret);
 		return ret;
 	}
 	LOG_INF("Inference completed in %u us", elapsed_us);
 
-	/* 7. Get output */
-	int8_t output_buf[256];
-	size_t output_size = sizeof(output_buf);
-
-	ret = syn_hal_npu_get_output(0, output_buf, &output_size);
-	if (ret != 0) {
-		LOG_ERR("Get output failed: %d", ret);
-		return ret;
-	}
+	size_t output_size = output.size;
 
 	/* 8. Find top prediction via DSP argmax */
 	uint32_t top_class = 0;

@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/github/v/release/Dimitrios-Kafetzis/SynapticOS?style=flat-square&color=blue" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square" alt="License"></a>
-  <a href="#roadmap"><img src="https://img.shields.io/badge/phase-1%20of%206-orange?style=flat-square" alt="Phase"></a>
+  <a href="#roadmap"><img src="https://img.shields.io/badge/phase-2%20of%206-orange?style=flat-square" alt="Phase"></a>
   <a href="#test-suite"><img src="https://img.shields.io/badge/tests-61%20passed-brightgreen?style=flat-square" alt="Tests"></a>
 </p>
 
@@ -116,11 +116,13 @@ west flash
 
 ```
 [00:00:00.000,000] <inf> hello_inference: === SynapticOS 0.1.0 — Hello Inference ===
-[00:00:00.000,000] <inf> hello_inference: Registered model 'test_classify' (handle=0)
+[00:00:00.000,000] <inf> hello_inference: Registered model 'test_classify' (handle=1)
 [00:00:00.000,000] <inf> hello_inference: Model loaded to NPU
 [00:00:00.000,000] <inf> hello_inference: Input tensor: 1x16x16x3 (768 bytes)
-[00:00:00.000,000] <inf> hello_inference: Inference completed in 42 us
+[00:00:00.000,000] <inf> syn_infer: Pipeline 'run_sync' built: 1 stages, est. 4106 bytes
+[00:00:00.000,000] <inf> hello_inference: Inference completed in 1361 us
 [00:00:00.000,000] <inf> hello_inference: Prediction: class 0 (confidence 127)
+[00:00:00.000,000] <inf> syn_prof: === Inference Profile ===
 [00:00:00.000,000] <inf> hello_inference: === Hello Inference complete ===
 ```
 
@@ -128,15 +130,15 @@ west flash
 
 ```bash
 west twister -T synaptic-os/tests/unit -p qemu_cortex_m3
-# 61 tests, 10 suites, 100% pass rate
+# 99 tests, 13 suites, 100% pass rate
 ```
 
 ## Build Footprint
 
 | Target | Flash | RAM |
 |--------|-------|-----|
-| FRDM-MCXN947 | 65 KB | 180 KB |
-| QEMU Cortex-M3 | 24 KB | 27 KB |
+| FRDM-MCXN947 | 84 KB | 186 KB |
+| QEMU Cortex-M3 | 28 KB | 30 KB |
 
 ## Project Structure
 
@@ -151,8 +153,9 @@ synaptic-os/
 │   ├── preprocess/         Image, audio, quantization pipelines
 │   └── postprocess/        Classification, detection output processing
 ├── samples/
-│   └── hello_inference/    End-to-end inference demo
-├── tests/unit/             61 unit tests across 10 suites
+│   ├── hello_inference/    End-to-end inference demo
+│   └── face_detection/     Continuous vision-pipeline demo
+├── tests/unit/             99 unit tests across 13 suites
 ├── boards/nxp/             Device tree overlays and board configs
 ├── scripts/                Environment setup and validation
 └── docs/                   Guides and specifications
@@ -166,15 +169,15 @@ SynapticOS is developed in six phases, each building on the previous:
   Phase 1        Phase 2         Phase 3        Phase 4       Phase 5        Phase 6
   Foundation     Inference       Dual-Core      Model         Production     Ecosystem
                  Pipeline        & IPC          Lifecycle     Hardening      & Tooling
-  ─────●─────────────○────────────○──────────────○─────────────○──────────────○───▶
+  ─────●─────────────◐────────────○──────────────○─────────────○──────────────○───▶
   v0.1.0         v0.2.0         v0.3.0         v0.4.0        v0.5.0         v1.0.0
-  ✓ Complete
+  ✓ Complete    In progress
 ```
 
 | Phase | Focus | Version |
 |-------|-------|---------|
 | **1. Foundation** | Memory, HAL, model registry, profiling, shell, tests | **v0.1.0** ✓ |
-| 2. Inference Pipeline | Zero-copy pipelines, layer preemption, TFLite integration | v0.2.0 |
+| **2. Inference Pipeline** | Pipeline engine, priority job scheduler, DSP ops, pre/post-processors, live profiling | v0.2.0 ◐ |
 | 3. Dual-Core & IPC | Asymmetric multiprocessing, shared-memory IPC | v0.3.0 |
 | 4. Model Lifecycle | OTA updates, A/B flash slots, model versioning | v0.4.0 |
 | 5. Production Hardening | Watchdog, fault recovery, soak testing, benchmarks | v0.5.0 |

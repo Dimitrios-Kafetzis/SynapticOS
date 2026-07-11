@@ -12,6 +12,8 @@
 #include <synaptic/syn_hal_dsp.h>
 #include <math.h>
 
+#include "../common/syn_dsp_soft.h"
+
 LOG_MODULE_REGISTER(syn_hal_dsp_stub, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #ifndef CLAMP
@@ -95,23 +97,11 @@ int syn_hal_dsp_argmax(const int8_t *data, size_t len, uint32_t *index)
 
 int syn_hal_dsp_fft_f32(const float *in, float *out, size_t len)
 {
-	ARG_UNUSED(in);
-	ARG_UNUSED(out);
-	ARG_UNUSED(len);
-
-	LOG_WRN("FFT not implemented in DSP stub");
-	return -ENOTSUP;
+	return syn_dsp_soft_fft_f32(in, out, len);
 }
 
 int syn_hal_dsp_mat_mult_q15(const int16_t *a, const int16_t *b,
 			     int16_t *out, uint16_t rows, uint16_t cols)
 {
-	ARG_UNUSED(a);
-	ARG_UNUSED(b);
-	ARG_UNUSED(out);
-	ARG_UNUSED(rows);
-	ARG_UNUSED(cols);
-
-	LOG_WRN("Matrix multiply not implemented in DSP stub");
-	return -ENOTSUP;
+	return syn_dsp_soft_mat_mult_q15(a, b, out, rows, cols);
 }

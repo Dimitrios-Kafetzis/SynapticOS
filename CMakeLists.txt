@@ -34,6 +34,10 @@ zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_OTA
     src/core/syn_model_ota.c
 )
 
+zephyr_library_sources(
+    src/hal/common/syn_dsp_soft.c
+)
+
 if(CONFIG_SOC_SERIES_MCXNX4X)
     zephyr_library_sources(
         src/hal/mcxn947/syn_hal_npu_neutron.c
