@@ -10,6 +10,9 @@
 #include <zephyr/shell/shell.h>
 #include <synaptic/syn_api.h>
 #include <stdlib.h>
+#include <math.h>
+
+#include "../hal/common/syn_dsp_soft.h"
 
 /* syn version */
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
@@ -143,6 +146,130 @@ static int cmd_prof_disable(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* syn dsp bench */
+#define BENCH_FFT_N     256
+#define BENCH_FFT_ITER  16
+#define BENCH_MAT_DIM   16
+#define BENCH_MAT_ITER  200
+
+static float bench_fft_in[BENCH_FFT_N * 2];
+static float bench_fft_soft[BENCH_FFT_N * 2];
+static float bench_fft_hal[BENCH_FFT_N * 2];
+static int16_t bench_mat_a[BENCH_MAT_DIM * BENCH_MAT_DIM] __aligned(4);
+static int16_t bench_mat_b[BENCH_MAT_DIM] __aligned(4);
+static int16_t bench_mat_soft[BENCH_MAT_DIM] __aligned(4);
+static int16_t bench_mat_hal[BENCH_MAT_DIM] __aligned(4);
+
+static int cmd_dsp_bench(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	uint32_t t0, soft_us, hal_us;
+
+	/* --- FFT: two-tone signal, N=256 complex points --- */
+	for (int i = 0; i < BENCH_FFT_N; i++) {
+		bench_fft_in[2 * i] =
+			sinf(2.0f * 3.14159265f * 5.0f * i / BENCH_FFT_N) +
+			0.5f * sinf(2.0f * 3.14159265f * 42.0f * i /
+				    BENCH_FFT_N);
+		bench_fft_in[2 * i + 1] = 0.0f;
+	}
+
+	t0 = k_cycle_get_32();
+	for (int it = 0; it < BENCH_FFT_ITER; it++) {
+		syn_dsp_soft_fft_f32(bench_fft_in, bench_fft_soft,
+				     BENCH_FFT_N);
+	}
+	soft_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+
+	t0 = k_cycle_get_32();
+	for (int it = 0; it < BENCH_FFT_ITER; it++) {
+		syn_hal_dsp_fft_f32(bench_fft_in, bench_fft_hal,
+				    BENCH_FFT_N);
+	}
+	hal_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+
+	float max_err = 0.0f;
+	float max_mag = 0.0f;
+
+	for (int i = 0; i < BENCH_FFT_N * 2; i++) {
+		float e = fabsf(bench_fft_hal[i] - bench_fft_soft[i]);
+		float m = fabsf(bench_fft_soft[i]);
+
+		if (e > max_err) {
+			max_err = e;
+		}
+		if (m > max_mag) {
+			max_mag = m;
+		}
+	}
+
+	shell_print(sh, "FFT f32 %u pts x%u:", BENCH_FFT_N, BENCH_FFT_ITER);
+	shell_print(sh, "  soft: %u us (%u us/op)", soft_us,
+		    soft_us / BENCH_FFT_ITER);
+	shell_print(sh, "  hal:  %u us (%u us/op)", hal_us,
+		    hal_us / BENCH_FFT_ITER);
+	if (hal_us > 0) {
+		shell_print(sh, "  speedup: %u.%02ux",
+			    soft_us / hal_us,
+			    (soft_us * 100 / hal_us) % 100);
+	}
+	shell_print(sh, "  max err: %d ppm of peak",
+		    max_mag > 0.0f ?
+		    (int)(max_err / max_mag * 1000000.0f) : 0);
+
+	/* --- Q15 matmul: 16x16 matrix times vector --- */
+	for (int i = 0; i < BENCH_MAT_DIM * BENCH_MAT_DIM; i++) {
+		bench_mat_a[i] = (int16_t)(((i * 2654435761U) >> 16) & 0x3FFF)
+				 - 8192;
+	}
+	for (int i = 0; i < BENCH_MAT_DIM; i++) {
+		bench_mat_b[i] = (int16_t)(((i * 40503U) & 0x3FFF) - 8192);
+	}
+
+	t0 = k_cycle_get_32();
+	for (int it = 0; it < BENCH_MAT_ITER; it++) {
+		syn_dsp_soft_mat_mult_q15(bench_mat_a, bench_mat_b,
+					  bench_mat_soft,
+					  BENCH_MAT_DIM, BENCH_MAT_DIM);
+	}
+	soft_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+
+	t0 = k_cycle_get_32();
+	for (int it = 0; it < BENCH_MAT_ITER; it++) {
+		syn_hal_dsp_mat_mult_q15(bench_mat_a, bench_mat_b,
+					 bench_mat_hal,
+					 BENCH_MAT_DIM, BENCH_MAT_DIM);
+	}
+	hal_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+
+	int max_lsb = 0;
+
+	for (int i = 0; i < BENCH_MAT_DIM; i++) {
+		int d = abs(bench_mat_hal[i] - bench_mat_soft[i]);
+
+		if (d > max_lsb) {
+			max_lsb = d;
+		}
+	}
+
+	shell_print(sh, "MatMul q15 %ux%u x%u:", BENCH_MAT_DIM,
+		    BENCH_MAT_DIM, BENCH_MAT_ITER);
+	shell_print(sh, "  soft: %u us (%u ns/op)", soft_us,
+		    soft_us * 1000 / BENCH_MAT_ITER);
+	shell_print(sh, "  hal:  %u us (%u ns/op)", hal_us,
+		    hal_us * 1000 / BENCH_MAT_ITER);
+	if (hal_us > 0) {
+		shell_print(sh, "  speedup: %u.%02ux",
+			    soft_us / hal_us,
+			    (soft_us * 100 / hal_us) % 100);
+	}
+	shell_print(sh, "  max err: %d LSB", max_lsb);
+
+	return 0;
+}
+
 /* syn infer run <model-name> */
 static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 {
@@ -237,6 +364,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_prof,
 	SHELL_SUBCMD_SET_END
 );
 
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_dsp,
+	SHELL_CMD(bench, NULL, "Benchmark DSP ops: hardware vs software",
+		  cmd_dsp_bench),
+	SHELL_SUBCMD_SET_END
+);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_infer,
 	SHELL_CMD_ARG(run, NULL, "Run inference: syn infer run <model-name>",
 		      cmd_infer_run, 2, 0),
@@ -248,6 +381,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(mem, &sub_mem, "Memory management", NULL),
 	SHELL_CMD(model, &sub_model, "Model management", NULL),
 	SHELL_CMD(npu, &sub_npu, "NPU control", NULL),
+	SHELL_CMD(dsp, &sub_dsp, "DSP operations", NULL),
 	SHELL_CMD(infer, &sub_infer, "Inference control", NULL),
 	SHELL_CMD(prof, &sub_prof, "Profiling", NULL),
 	SHELL_SUBCMD_SET_END

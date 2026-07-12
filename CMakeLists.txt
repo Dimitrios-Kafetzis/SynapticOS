@@ -44,6 +44,18 @@ if(CONFIG_SOC_SERIES_MCXNX4X)
         src/hal/mcxn947/syn_hal_dsp_pq.c
         src/hal/mcxn947/syn_hal_dma_sdma.c
     )
+    if(CONFIG_SYNAPTIC_POWERQUAD)
+        # PowerQuad SDK driver has no Zephyr glue in this hal_nxp
+        # revision; compile the needed engines directly.
+        set(SYN_PQ_DIR
+            ${ZEPHYR_HAL_NXP_MODULE_DIR}/mcux/mcux-sdk/drivers/powerquad)
+        zephyr_library_sources(
+            ${SYN_PQ_DIR}/fsl_powerquad_basic.c
+            ${SYN_PQ_DIR}/fsl_powerquad_transform.c
+            ${SYN_PQ_DIR}/fsl_powerquad_matrix.c
+        )
+        zephyr_library_include_directories(${SYN_PQ_DIR})
+    endif()
 else()
     zephyr_library_sources(
         src/hal/stub/syn_hal_npu_stub.c
