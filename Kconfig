@@ -50,6 +50,15 @@ config SYNAPTIC_MAX_PIPELINE_STAGES
       Maximum number of stages (preprocess + model + postprocess)
       in a single inference pipeline.
 
+config SYNAPTIC_POWERQUAD
+    bool "Use PowerQuad hardware acceleration"
+    depends on SOC_SERIES_MCXNX4X
+    default y
+    help
+      Route FFT and Q15 matrix operations through the PowerQuad
+      coprocessor. Init runs known-answer self-calibration and
+      falls back to the software kernels per-operation if it fails.
+
 config SYNAPTIC_PROFILING
     bool "Enable inference profiling"
     default y if DEBUG
