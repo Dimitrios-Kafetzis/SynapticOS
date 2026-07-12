@@ -31,9 +31,9 @@ extern "C" {
 
 /** SynapticOS version */
 #define SYNAPTIC_VERSION_MAJOR  0
-#define SYNAPTIC_VERSION_MINOR  1
+#define SYNAPTIC_VERSION_MINOR  2
 #define SYNAPTIC_VERSION_PATCH  0
-#define SYNAPTIC_VERSION_STRING "0.1.0"
+#define SYNAPTIC_VERSION_STRING "0.2.0"
 
 /**
  * @brief Initialize the SynapticOS runtime.
