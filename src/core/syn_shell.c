@@ -18,6 +18,10 @@
 #include "syn_mpu_internal.h"
 #endif
 
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+#include "syn_boot_internal.h"
+#endif
+
 /* syn version */
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -344,6 +348,27 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+/* syn ipc status */
+static int cmd_ipc_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "CPU1 link: %s",
+		    syn_boot_secondary_linked() ? "UP" : "DOWN");
+	if (syn_boot_cpu1_boot_us() != 0U) {
+		shell_print(sh, "CPU1 boot time: %u us (release to ready)",
+			    syn_boot_cpu1_boot_us());
+		shell_print(sh, "IPC handshake:  %u us (release to STATUS_REQ)",
+			    syn_boot_handshake_us());
+	}
+	shell_print(sh, "STATUS_REQ answered: %u",
+		    syn_boot_status_req_count());
+	return 0;
+}
+#endif /* CONFIG_SYNAPTIC_DUAL_CORE && !CPU1 */
+
 #ifdef CONFIG_SYNAPTIC_MPU_PROTECT
 /* syn mpu test */
 static int cmd_mpu_test(const struct shell *sh, size_t argc, char **argv)
@@ -414,6 +439,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_mpu,
 );
 #endif
 
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ipc,
+	SHELL_CMD(status, NULL, "Show CPU1 link status", cmd_ipc_status),
+	SHELL_SUBCMD_SET_END
+);
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(version, NULL, "Print SynapticOS version", cmd_version),
 	SHELL_CMD(mem, &sub_mem, "Memory management", NULL),
@@ -424,6 +456,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(prof, &sub_prof, "Profiling", NULL),
 #ifdef CONFIG_SYNAPTIC_MPU_PROTECT
 	SHELL_CMD(mpu, &sub_mpu, "Cross-core memory protection", NULL),
+#endif
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+	SHELL_CMD(ipc, &sub_ipc, "Inter-core communication", NULL),
 #endif
 	SHELL_SUBCMD_SET_END
 );

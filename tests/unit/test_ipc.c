@@ -102,9 +102,9 @@ ZTEST(syn_ipc_suite, test_memory_map_tiles)
 	zassert_equal(SYN_SHM_SHARED_BASE + SYN_SHM_SHARED_SIZE,
 		      SYN_SHM_CPU1_RAM_BASE, "gap between shared and CPU1");
 
-	/* Fits MCXN947 main SRAM: 416 KB at 0x20000000 */
+	/* Fits MCXN947 main SRAM: 416 KB at secure alias 0x30000000 */
 	zassert_true(SYN_SHM_CPU1_RAM_BASE + SYN_SHM_CPU1_RAM_SIZE <=
-		     0x20000000UL + 416 * 1024UL,
+		     0x30000000UL + 416 * 1024UL,
 		     "map exceeds physical SRAM");
 }
 

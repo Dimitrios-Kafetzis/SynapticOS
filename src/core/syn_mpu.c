@@ -8,12 +8,17 @@
  * other core's private SRAM, so a stray cross-core write raises a
  * MemManage fault on the offending core.
  *
- * ARMv8-M limitation, stated plainly: the MPU access-permission field
- * has no privileged-no-access encoding, and Zephyr keeps the default
- * background map enabled for privileged code (required for ROM API and
- * peripheral access). Cross-core WRITES fault; cross-core reads remain
- * permitted. Writes are the corruption hazard in an AMP system, so this
- * is the protection that matters.
+ * Two limitations, stated plainly:
+ *  - ARMv8-M's access-permission field has no privileged-no-access
+ *    encoding, and Zephyr keeps the default background map enabled
+ *    for privileged code (required for ROM API and peripheral
+ *    access). Cross-core WRITES fault; reads remain permitted.
+ *    Writes are the corruption hazard in an AMP system, so this is
+ *    the protection that matters.
+ *  - MCXN947's CPU1 has NO MPU at all (__MPU_PRESENT is 0 in the
+ *    cm33_core1 CMSIS header), so enforcement is one-directional:
+ *    CPU0 cannot corrupt CPU1's RAM, but CPU1's accesses cannot be
+ *    faulted by CPU1 itself. This file is CPU0-only.
  *
  * This file adds the runtime pieces:
  *  - a fatal-error policy that turns an MPU violation into "log it,
@@ -33,13 +38,11 @@
 
 LOG_MODULE_REGISTER(syn_mpu, CONFIG_SYNAPTIC_LOG_LEVEL);
 
-#if defined(CONFIG_SOC_MCXN947_CPU1)
-#define SYN_MPU_GUARDED_BASE  SYN_SHM_CPU0_RAM_BASE
-#define SYN_MPU_GUARDED_SIZE  SYN_SHM_CPU0_RAM_SIZE
-#else
+/* CPU0 guards CPU1's private RAM (SYNAPTIC_MPU_PROTECT depends on
+ * ARM_MPU, which only CPU0 has).
+ */
 #define SYN_MPU_GUARDED_BASE  SYN_SHM_CPU1_RAM_BASE
 #define SYN_MPU_GUARDED_SIZE  SYN_SHM_CPU1_RAM_SIZE
-#endif
 
 /*
  * Fatal-error policy: a CPU exception raised in thread context (which

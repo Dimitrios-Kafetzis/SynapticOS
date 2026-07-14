@@ -16,6 +16,15 @@
  *   0x2004_0000 - 0x2005_7FFF  Shared IPC region (96 KB, RAMF + half RAMG)
  *   0x2005_8000 - 0x2006_7FFF  CPU1 private (64 KB, half RAMG + RAMH)
  *
+ * Address views differ per core. CPU0 runs Secure (TrustZone-M) and
+ * uses the +0x1000_0000 secure bus aliases: RAM at 0x3xxx_xxxx,
+ * flash at 0x1xxx_xxxx (CONFIG_SRAM_BASE_ADDRESS=0x30000000). CPU1
+ * is a Cortex-M33 WITHOUT TrustZone (also no FPU/DSP/MPU, per the
+ * MCXN947_cm33_core1 CMSIS header) and addresses the same physical
+ * memory at the plain addresses (RAM 0x2xxx_xxxx, flash 0x0xxx_xxxx,
+ * peripherals 0x4xxx_xxxx). The constants below therefore fold in a
+ * per-core alias so each core gets pointers it can dereference.
+ *
  * Note: the phase plan sketched a 160 KB CPU1 region ending at
  * 0x2007_FFFF; that exceeds the physical 416 KB main SRAM (96 KB of
  * the chip's 512 KB total is RAMX at 0x0400_0000). CPU1 gets 64 KB of
@@ -38,17 +47,29 @@
 extern "C" {
 #endif
 
-/* Physical memory map (MCXN947) */
-#define SYN_SHM_CPU0_RAM_BASE   0x20000000UL
+/* Per-core address alias: CPU0 secure view vs CPU1 plain view */
+#if defined(CONFIG_SOC_MCXN947_CPU1)
+#define SYN_SHM_ALIAS           0x00000000UL
+#else
+#define SYN_SHM_ALIAS           0x10000000UL
+#endif
+
+/* Memory map (MCXN947, this core's view) */
+#define SYN_SHM_CPU0_RAM_BASE   (0x20000000UL + SYN_SHM_ALIAS)
 #define SYN_SHM_CPU0_RAM_SIZE   (256 * 1024UL)
-#define SYN_SHM_SHARED_BASE     0x20040000UL
+#define SYN_SHM_SHARED_BASE     (0x20040000UL + SYN_SHM_ALIAS)
 #define SYN_SHM_SHARED_SIZE     (96 * 1024UL)
-#define SYN_SHM_CPU1_RAM_BASE   0x20058000UL
+#define SYN_SHM_CPU1_RAM_BASE   (0x20058000UL + SYN_SHM_ALIAS)
 #define SYN_SHM_CPU1_RAM_SIZE   (64 * 1024UL)
 
 /* CPU1 image location: XIP from the second half of the 2 MB flash */
-#define SYN_SHM_CPU1_FLASH_BASE 0x00100000UL
+#define SYN_SHM_CPU1_FLASH_BASE (0x00100000UL + SYN_SHM_ALIAS)
 #define SYN_SHM_CPU1_FLASH_SIZE (1024 * 1024UL)
+
+/* Value CPU0 writes to SYSCON CPBOOT: CPU1 fetches its vector table
+ * through its own (non-TrustZone, plain) address view.
+ */
+#define SYN_BOOT_CPU1_VECTOR    0x00100000UL
 
 /* Layout identification */
 #define SYN_SHM_MAGIC           0x53594E33UL /* "SYN3" */
