@@ -1,0 +1,87 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * FRDM-MCXN947 second core (CPU1) for SynapticOS.
+ *
+ * CPU1 is the application core in the asymmetric dual-core split:
+ * a Cortex-M33 WITHOUT FPU, DSP, TrustZone-M or MPU (see the
+ * MCXN947_cm33_core1 CMSIS header: all four _PRESENT macros are 0).
+ * Consequences baked into this board:
+ *  - non-secure devicetree (nxp_mcxn94x_ns.dtsi): CPU1 has no IDAU,
+ *    so it addresses RAM/flash/peripherals at their plain addresses
+ *    (0x20058000 RAM, 0x00100000 flash, 0x4xxxxxxx peripherals),
+ *    while CPU0 uses the secure +0x10000000 aliases
+ *  - no MPU regions: cross-core write protection is enforced on
+ *    CPU0's side only; CPU1 physically cannot fault its own accesses
+ *  - executes XIP from flash bank 1, released by CPU0 via SYSCON
+ *    CPBOOT/CPUCTRL
+ *  - no UART console: results travel over IPC to CPU0's console
+ *  - private SysTick as kernel timer; clocks come up under CPU0
+ *
+ * Must match src/core/syn_shared_layout.h.
+ */
+
+/dts-v1/;
+
+/* nxp_mcxn94x_ns.dtsi uses DT_SIZE_M but does not include mem.h
+ * itself (the secure variant does); provide it here.
+ */
+#include <mem.h>
+#include <arm/armv8-m.dtsi>
+#include <nxp/nxp_mcxn94x_ns.dtsi>
+
+/ {
+	model = "NXP FRDM-MCXN947 CPU1 (SynapticOS)";
+	compatible = "nxp,mcxn947", "nxp,mcx";
+
+	cpus {
+		/delete-node/ cpu@0;
+	};
+
+	chosen {
+		zephyr,sram = &cpu1_sram;
+		zephyr,flash = &cpu1_flash;
+		zephyr,flash-controller = &fmu;
+	};
+};
+
+&sram {
+	cpu1_sram: memory@20058000 {
+		compatible = "mmio-sram";
+		reg = <0x20058000 DT_SIZE_K(64)>;
+	};
+
+	/* Shared IPC region; address consumed via DT_NODELABEL by the
+	 * application. No memory-attr: CPU1 has no MPU to program.
+	 */
+	syn_shared: memory@20040000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x20040000 DT_SIZE_K(96)>;
+		zephyr,memory-region = "SYN_SHARED";
+	};
+};
+
+&fmu {
+	/* CPU1 image lives in the upper 1 MB of the 2 MB flash */
+	cpu1_flash: flash@100000 {
+		compatible = "soc-nv-flash";
+		reg = <0x100000 DT_SIZE_M(1)>;
+		erase-block-size = <8192>;
+		write-block-size = <128>;
+	};
+};
+
+/* CPU0 owns the lower flash bank; shrink the stock node so the two
+ * views never overlap in this build.
+ */
+&flash {
+	reg = <0x0 DT_SIZE_M(1)>;
+};
+
+&systick {
+	status = "okay";
+};
+
+/* The enet-qos binding requires pinctrl the CPU1 image never uses;
+ * CPU0 owns all pin muxing. Remove the node entirely.
+ */
+/delete-node/ &enet;

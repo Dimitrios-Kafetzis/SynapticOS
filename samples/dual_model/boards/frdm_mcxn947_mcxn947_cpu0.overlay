@@ -1,0 +1,31 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * Dual-core shared memory layout for CPU0 (AI runtime core).
+ *
+ * The stock board file gives CPU0 320 KB at 0x20000000. For dual-core
+ * operation CPU0 keeps 256 KB, the next 96 KB become the shared IPC
+ * region, and the remaining 64 KB (0x20058000-0x20067FFF) are CPU1's
+ * private RAM. Must match src/core/syn_shared_layout.h.
+ *
+ * MPU regions: SYN_SHARED (normal RAM, non-cacheable, read-write)
+ * comes from this node. The read-only guard over CPU1's private RAM
+ * is NOT a DT node: DT can only express it as ATTR_MPU_FLASH, and
+ * the flash driver's MPU_ALLOW_FLASH_WRITE select silently rewrites
+ * FLASH-attr regions to read-write. syn_mpu.c programs the guard
+ * directly with explicit read-only permissions instead.
+ */
+
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+
+&sram0 {
+	reg = <0x20000000 DT_SIZE_K(256)>;
+};
+
+&sram {
+	syn_shared: memory@20040000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x20040000 DT_SIZE_K(96)>;
+		zephyr,memory-region = "SYN_SHARED";
+		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
+	};
+};

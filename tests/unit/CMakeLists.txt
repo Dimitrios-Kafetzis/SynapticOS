@@ -20,3 +20,8 @@ target_sources(app PRIVATE
 )
 
 target_link_libraries(app PRIVATE synaptic_os)
+
+# Tests exercise private core internals (shared memory layout, ring ops)
+target_include_directories(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/core
+)

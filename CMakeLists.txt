@@ -20,10 +20,17 @@ zephyr_library_sources(
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC
     src/core/syn_infer.c
+    src/core/syn_ipc_ring.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_DUAL_CORE
     src/core/syn_ipc.c
+    src/core/syn_boot.c
+    src/core/syn_infer_remote.c
+)
+
+zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_MPU_PROTECT
+    src/core/syn_mpu.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_SHELL
@@ -55,6 +62,12 @@ if(CONFIG_SOC_SERIES_MCXNX4X)
             ${SYN_PQ_DIR}/fsl_powerquad_matrix.c
         )
         zephyr_library_include_directories(${SYN_PQ_DIR})
+    endif()
+    if(CONFIG_SYNAPTIC_DUAL_CORE)
+        # MAILBOX SDK driver is header-only; no Zephyr glue for the
+        # MCXN947 in this hal_nxp revision, so add it directly.
+        zephyr_library_include_directories(
+            ${ZEPHYR_HAL_NXP_MODULE_DIR}/mcux/mcux-sdk/drivers/mailbox)
     endif()
 else()
     zephyr_library_sources(

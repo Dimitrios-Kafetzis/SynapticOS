@@ -14,6 +14,16 @@
 
 #include "../hal/common/syn_dsp_soft.h"
 
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+#include "syn_mpu_internal.h"
+#endif
+
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+#include "syn_boot_internal.h"
+#include "syn_infer_remote.h"
+#include "syn_ipc_internal.h"
+#endif
+
 /* syn version */
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -340,6 +350,64 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+/* syn ipc status */
+static int cmd_ipc_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "CPU1 link: %s",
+		    syn_boot_secondary_linked() ? "UP" : "DOWN");
+	if (syn_boot_cpu1_boot_us() != 0U) {
+		shell_print(sh, "CPU1 boot time: %u us (release to ready)",
+			    syn_boot_cpu1_boot_us());
+		shell_print(sh, "IPC handshake:  %u us (release to STATUS_REQ)",
+			    syn_boot_handshake_us());
+	}
+	shell_print(sh, "STATUS_REQ answered: %u",
+		    syn_boot_status_req_count());
+	shell_print(sh, "Inferences served: %u (errors %u, avg %u us)",
+		    syn_remote_serve_count(), syn_remote_serve_errors(),
+		    syn_remote_serve_avg_us());
+
+	syn_shm_region_t *shm = syn_ipc_region();
+
+	if (shm != NULL && shm->ctrl.rtt_count > 0U) {
+		shell_print(sh, "IPC round-trip (CPU1-measured, %u samples): "
+				"last %u us, min %u us, max %u us",
+			    shm->ctrl.rtt_count, shm->ctrl.rtt_last_us,
+			    shm->ctrl.rtt_min_us, shm->ctrl.rtt_max_us);
+	}
+	return 0;
+}
+#endif /* CONFIG_SYNAPTIC_DUAL_CORE && !CPU1 */
+
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+/* syn mpu test */
+static int cmd_mpu_test(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Running cross-core MPU self-test "
+			"(a MemManage fault dump below is EXPECTED)...");
+
+	int ret = syn_mpu_selftest();
+
+	if (ret == 0) {
+		shell_print(sh, "MPU self-test PASS: shared region writable, "
+				"cross-core write faulted");
+	} else if (ret == -EPERM) {
+		shell_error(sh, "MPU self-test FAIL: cross-core write was "
+				"NOT blocked");
+	} else {
+		shell_error(sh, "MPU self-test error: %d", ret);
+	}
+	return ret;
+}
+#endif /* CONFIG_SYNAPTIC_MPU_PROTECT */
+
 /* Subcommand trees */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_mem,
 	SHELL_CMD(stats, NULL, "Show memory statistics", cmd_mem_stats),
@@ -376,6 +444,22 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_infer,
 	SHELL_SUBCMD_SET_END
 );
 
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_mpu,
+	SHELL_CMD(test, NULL,
+		  "Verify cross-core MPU protection (provokes a fault)",
+		  cmd_mpu_test),
+	SHELL_SUBCMD_SET_END
+);
+#endif
+
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ipc,
+	SHELL_CMD(status, NULL, "Show CPU1 link status", cmd_ipc_status),
+	SHELL_SUBCMD_SET_END
+);
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(version, NULL, "Print SynapticOS version", cmd_version),
 	SHELL_CMD(mem, &sub_mem, "Memory management", NULL),
@@ -384,6 +468,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(dsp, &sub_dsp, "DSP operations", NULL),
 	SHELL_CMD(infer, &sub_infer, "Inference control", NULL),
 	SHELL_CMD(prof, &sub_prof, "Profiling", NULL),
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+	SHELL_CMD(mpu, &sub_mpu, "Cross-core memory protection", NULL),
+#endif
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+	SHELL_CMD(ipc, &sub_ipc, "Inter-core communication", NULL),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 

@@ -98,6 +98,20 @@ config SYNAPTIC_SHARED_REGION_SIZE
       Size of the shared SRAM region for IPC and tensor exchange
       between CPU0 and CPU1. Default 96 KB.
 
+config SYNAPTIC_MPU_PROTECT
+    bool "Cross-core MPU protection support"
+    depends on SYNAPTIC_DUAL_CORE && ARM_MPU
+    default y
+    help
+      Runtime support for cross-core memory protection: a fault
+      policy that logs MPU violations and aborts only the offending
+      thread (the other core is never affected), plus a self-test
+      that provokes a guarded write. The guard regions themselves
+      are declared in the device tree as read-only MPU regions over
+      the other core's private SRAM. Note: ARMv8-M cannot deny
+      privileged reads while the background map is enabled, so only
+      cross-core writes fault.
+
 config SYNAPTIC_SHELL
     bool "Enable SynapticOS shell commands"
     depends on SHELL
