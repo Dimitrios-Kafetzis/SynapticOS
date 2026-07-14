@@ -34,6 +34,10 @@
 
 #include <fsl_device_registers.h>
 
+#ifdef CONFIG_SOC_FLASH_MCUX
+#include "fsl_flash.h" /* MCX ROM API: safe reads of possibly-blank flash */
+#endif
+
 LOG_MODULE_REGISTER(syn_boot, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 /* SYSCON->CPUCTRL writes must carry this key in bits 31:16 */
@@ -66,10 +70,69 @@ static void status_req_handler(const syn_ipc_msg_t *msg, void *ctx)
 	}
 }
 
+/*
+ * Releasing CPU1 into ERASED flash wedges the entire chip: on the
+ * MCXN947, reading erased flash raises an ECC bus error, CPU1's
+ * vector fetch from the blank bank stalls the flash system CPU0
+ * also executes from, and even the debug port stops responding
+ * (found the hard way during Phase 3 bring-up). So never release
+ * blindly: blank-check bank 1 through the flash driver first, which
+ * uses the FMC MARGIN/BLANK_CHECK commands instead of bus reads.
+ */
+static bool cpu1_image_present(void)
+{
+#ifdef CONFIG_SOC_FLASH_MCUX
+	static flash_config_t fcfg;
+	uint32_t vec[2];
+
+	if (FLASH_Init(&fcfg) != kStatus_Success) {
+		LOG_WRN("Flash API init failed; assuming CPU1 image present");
+		return true;
+	}
+
+	/* Blank check via FMC command: never bus-read possibly-erased
+	 * flash directly. Success here means the bank IS erased.
+	 */
+	if (FLASH_VerifyErase(&fcfg, SYN_BOOT_CPU1_VECTOR, 32U) ==
+	    kStatus_Success) {
+		return false;
+	}
+
+	/* ROM-mediated read of the vector table (ECC-safe) */
+	if (FLASH_Read(&fcfg, SYN_BOOT_CPU1_VECTOR, (uint8_t *)vec,
+		       sizeof(vec)) != kStatus_Success) {
+		LOG_WRN("Flash bank 1 unreadable: no CPU1 image");
+		return false;
+	}
+
+	/* Sanity: initial SP in SRAM, thumb reset vector */
+	if (vec[0] < 0x20000000UL || vec[0] > 0x30070000UL) {
+		LOG_WRN("CPU1 vector table invalid (SP 0x%08x)", vec[0]);
+		return false;
+	}
+	if ((vec[1] & 1UL) == 0UL) {
+		LOG_WRN("CPU1 vector table invalid (PC 0x%08x)", vec[1]);
+		return false;
+	}
+	return true;
+#else
+	/* Without the flash HAL there is no safe way to probe the
+	 * bank; assume it is programmed (flashing workflow guarantees
+	 * both banks are written together).
+	 */
+	return true;
+#endif
+}
+
 int syn_boot_secondary(void *shared_base, uint32_t timeout_ms)
 {
 	if (shared_base == NULL || timeout_ms == 0U) {
 		return -EINVAL;
+	}
+
+	if (!cpu1_image_present()) {
+		LOG_ERR("CPU1 image absent (flash bank 1 blank): single-core mode");
+		return -ENODEV;
 	}
 
 	shm_ctrl = &((syn_shm_region_t *)shared_base)->ctrl;

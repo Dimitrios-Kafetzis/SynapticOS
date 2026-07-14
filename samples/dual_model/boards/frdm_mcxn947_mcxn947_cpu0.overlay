@@ -7,10 +7,12 @@
  * region, and the remaining 64 KB (0x20058000-0x20067FFF) are CPU1's
  * private RAM. Must match src/core/syn_shared_layout.h.
  *
- * MPU regions generated from these nodes:
- *  - SYN_SHARED: normal RAM, non-cacheable, read-write (IPC traffic)
- *  - SYN_CPU1_GUARD: read-only over CPU1's private RAM, so a stray
- *    write from CPU0 into CPU1 memory raises a MemManage fault.
+ * MPU regions: SYN_SHARED (normal RAM, non-cacheable, read-write)
+ * comes from this node. The read-only guard over CPU1's private RAM
+ * is NOT a DT node: DT can only express it as ATTR_MPU_FLASH, and
+ * the flash driver's MPU_ALLOW_FLASH_WRITE select silently rewrites
+ * FLASH-attr regions to read-write. syn_mpu.c programs the guard
+ * directly with explicit read-only permissions instead.
  */
 
 #include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
@@ -25,12 +27,5 @@
 		reg = <0x20040000 DT_SIZE_K(96)>;
 		zephyr,memory-region = "SYN_SHARED";
 		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE) )>;
-	};
-
-	syn_cpu1_guard: memory@20058000 {
-		compatible = "zephyr,memory-region";
-		reg = <0x20058000 DT_SIZE_K(64)>;
-		zephyr,memory-region = "SYN_CPU1_GUARD";
-		zephyr,memory-attr = <( DT_MEM_ARM(ATTR_MPU_FLASH) )>;
 	};
 };

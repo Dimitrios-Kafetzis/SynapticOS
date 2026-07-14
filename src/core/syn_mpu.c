@@ -21,6 +21,13 @@
  *    faulted by CPU1 itself. This file is CPU0-only.
  *
  * This file adds the runtime pieces:
+ *  - the guard region itself, programmed directly into the last MPU
+ *    region slot with explicit read-only permissions. It was a DT
+ *    memory-attr node (ATTR_MPU_FLASH) at first, but the flash
+ *    driver's Kconfig force-selects MPU_ALLOW_FLASH_WRITE, which
+ *    silently rewrites every FLASH-attr region to read-WRITE and
+ *    disarmed the guard (caught live on the board by 'syn mpu
+ *    test'). Direct programming is immune to that;
  *  - a fatal-error policy that turns an MPU violation into "log it,
  *    abort the offending thread, keep the core running" instead of a
  *    system halt, so a fault on one core never takes down the other;
@@ -29,9 +36,12 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/fatal.h>
+#include <zephyr/sys/barrier.h>
+#include <cmsis_core.h>
 
 #include "syn_shared_layout.h"
 #include "syn_mpu_internal.h"
@@ -43,6 +53,49 @@ LOG_MODULE_REGISTER(syn_mpu, CONFIG_SYNAPTIC_LOG_LEVEL);
  */
 #define SYN_MPU_GUARDED_BASE  SYN_SHM_CPU1_RAM_BASE
 #define SYN_MPU_GUARDED_SIZE  SYN_SHM_CPU1_RAM_SIZE
+
+BUILD_ASSERT((SYN_MPU_GUARDED_BASE % 32U) == 0U &&
+	     (SYN_MPU_GUARDED_SIZE % 32U) == 0U,
+	     "MPU region must be 32-byte aligned");
+
+/*
+ * Claim the LAST MPU region slot for the guard. Zephyr allocates its
+ * static regions (flash, SRAM, DT memory-attr nodes) from index 0
+ * upward during arch_kernel_init(), before any SYS_INIT level runs,
+ * and this build has no dynamic region users (no userspace, no MPU
+ * stack guard). AP encoding 0b11 = read-only at ANY privilege level;
+ * MAIR attr index 1 is Zephyr's normal-SRAM attribute.
+ */
+static int syn_mpu_guard_init(void)
+{
+	uint32_t regions = (MPU->TYPE & MPU_TYPE_DREGION_Msk) >>
+			   MPU_TYPE_DREGION_Pos;
+
+	if (regions == 0U) {
+		LOG_ERR("No MPU regions available; cross-core guard OFF");
+		return 0;
+	}
+
+	uint32_t idx = regions - 1U;
+
+	MPU->RNR = idx;
+	MPU->RBAR = ARM_MPU_RBAR(SYN_MPU_GUARDED_BASE, ARM_MPU_SH_NON,
+				 1U /* read-only */, 1U /* any privilege */,
+				 1U /* execute never */);
+	MPU->RLAR = ARM_MPU_RLAR(SYN_MPU_GUARDED_BASE +
+				 SYN_MPU_GUARDED_SIZE - 1U,
+				 1U /* MAIR: normal SRAM */);
+
+	barrier_dsync_fence_full();
+	barrier_isync_fence_full();
+
+	LOG_INF("Cross-core guard: 0x%08lx +%u KB read-only (MPU region %u)",
+		(unsigned long)SYN_MPU_GUARDED_BASE,
+		(unsigned)(SYN_MPU_GUARDED_SIZE / 1024U), idx);
+	return 0;
+}
+
+SYS_INIT(syn_mpu_guard_init, PRE_KERNEL_1, 99);
 
 /*
  * Fatal-error policy: a CPU exception raised in thread context (which
