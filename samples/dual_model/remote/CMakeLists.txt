@@ -9,3 +9,8 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(dual_model_remote VERSION 0.1.0)
 target_sources(app PRIVATE src/main.c)
 target_link_libraries(app PRIVATE synaptic_os)
+
+# Cross-core inference helpers are internal API, not frozen headers
+target_include_directories(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/core
+)

@@ -26,6 +26,7 @@ zephyr_library_sources_ifdef(CONFIG_SYNAPTIC
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_DUAL_CORE
     src/core/syn_ipc.c
     src/core/syn_boot.c
+    src/core/syn_infer_remote.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_MPU_PROTECT

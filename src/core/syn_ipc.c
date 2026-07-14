@@ -30,6 +30,7 @@
 
 #include "syn_shared_layout.h"
 #include "syn_ipc_ring.h"
+#include "syn_ipc_internal.h"
 
 #include <fsl_mailbox.h>
 
@@ -234,6 +235,11 @@ int syn_ipc_receive(syn_ipc_msg_t *msg, uint32_t timeout_ms)
 		return -EAGAIN;
 	}
 	return 0;
+}
+
+syn_shm_region_t *syn_ipc_region(void)
+{
+	return ipc_ready ? shm : NULL;
 }
 
 int syn_ipc_register_handler(syn_ipc_type_t type,

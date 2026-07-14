@@ -17,7 +17,42 @@
 #include <zephyr/devicetree.h>
 #include <synaptic/syn_ipc.h>
 
+#include "syn_infer_remote.h"
+
 #define SYN_SHARED_NODE DT_NODELABEL(syn_shared)
+
+/* Smoke-test the cross-core inference protocol once at boot: resolve
+ * the face_detect model and run a single request. The result is
+ * reported to CPU0 implicitly (its console logs the served request);
+ * a local failure just skips ahead to the heartbeat loop.
+ */
+static void infer_smoke_test(void)
+{
+	syn_model_handle_t model;
+	static uint8_t output[144];
+	size_t in_cap = 0, out_len = 0;
+	const size_t in_len = 96 * 96 * 3;
+
+	if (syn_remote_model_lookup("face_detect", 500, &model) != 0) {
+		return;
+	}
+
+	/* CPU1 has 64 KB of RAM: stage the frame zero-copy in the
+	 * shared slot instead of a private 27 KB buffer.
+	 */
+	uint8_t *input = syn_remote_infer_input(&in_cap);
+
+	if (input == NULL || in_cap < in_len) {
+		return;
+	}
+	for (size_t i = 0; i < in_len; i++) {
+		input[i] = (uint8_t)(i & 0xFF);
+	}
+
+	(void)syn_remote_infer(model, input, in_len,
+			       output, sizeof(output), &out_len,
+			       SYN_PRIORITY_NORMAL, 1000);
+}
 
 int main(void)
 {
@@ -40,6 +75,8 @@ int main(void)
 			k_sleep(K_FOREVER);
 		}
 	}
+
+	infer_smoke_test();
 
 	/* Handshake, then 1 Hz heartbeat */
 	for (;;) {

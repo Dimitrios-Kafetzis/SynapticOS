@@ -88,10 +88,15 @@ ZTEST(syn_ipc_suite, test_shared_region_layout)
 	zassert_equal(offsetof(syn_ipc_ring_t, tail), 64, "tail moved");
 	zassert_equal(offsetof(syn_ipc_ring_t, slots), 128, "slots moved");
 
-	/* Everything incl. inference buffers fits the 96 KB region */
-	zassert_true(SYN_SHM_PAYLOAD_OFFSET + SYN_SHM_INFER_OUTPUT_OFFSET +
-		     SYN_SHM_INFER_OUTPUT_SIZE <= SYN_SHM_SHARED_SIZE,
+	/* Everything incl. the inference slot fits the 96 KB region */
+	zassert_true(SYN_SHM_PAYLOAD_OFFSET + sizeof(syn_shm_infer_slot_t) <=
+		     SYN_SHM_SHARED_SIZE,
 		     "layout exceeds shared region");
+	zassert_equal(offsetof(syn_shm_infer_slot_t, input), 64,
+		      "infer slot header changed");
+	zassert_equal(offsetof(syn_shm_infer_slot_t, output),
+		      64 + SYN_SHM_INFER_INPUT_SIZE,
+		      "infer slot output placement changed");
 }
 
 ZTEST(syn_ipc_suite, test_memory_map_tiles)

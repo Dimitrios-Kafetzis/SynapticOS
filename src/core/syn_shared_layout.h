@@ -132,16 +132,30 @@ typedef struct {
 #define SYN_SHM_PAYLOAD_OFFSET  offsetof(syn_shm_region_t, payload)
 
 /*
- * Fixed payload slots for the cross-core inference protocol (3.4).
- * Offsets are relative to the payload pool. Input sized for the
- * largest supported vision input (96x96x3 INT8); output covers
- * classification or detection results with headroom.
+ * Cross-core inference exchange slot, at the start of the payload
+ * pool. Input sized for the largest supported vision input
+ * (96x96x3 INT8); output covers classification or detection results
+ * with headroom. One request outstanding at a time: the CPU1-side
+ * helper serializes callers, additional requests queue behind the
+ * slot mutex (the message ring itself never sees more than one
+ * in-flight INFER_REQ).
  */
-#define SYN_SHM_INFER_INPUT_OFFSET   0UL
 #define SYN_SHM_INFER_INPUT_SIZE     (27648UL)      /* 96*96*3 */
-#define SYN_SHM_INFER_OUTPUT_OFFSET  (SYN_SHM_INFER_INPUT_OFFSET + \
-				      SYN_SHM_INFER_INPUT_SIZE)
 #define SYN_SHM_INFER_OUTPUT_SIZE    (4096UL)
+
+typedef struct {
+	uint32_t model;          /**< CPU1: model handle for INFER_REQ  */
+	char     model_name[32]; /**< CPU1: name for MODEL_LOAD lookup  */
+	uint32_t input_len;      /**< CPU1: valid bytes in input[]      */
+	uint32_t output_len;     /**< CPU0: valid bytes in output[]     */
+	int32_t  infer_status;   /**< CPU0: inference result code       */
+	uint32_t reserved[4];    /**< Pad header to 64 bytes            */
+	uint8_t  input[SYN_SHM_INFER_INPUT_SIZE];
+	uint8_t  output[SYN_SHM_INFER_OUTPUT_SIZE];
+} syn_shm_infer_slot_t;
+
+BUILD_ASSERT(offsetof(syn_shm_infer_slot_t, input) == 64,
+	     "infer slot header must be 64 bytes");
 
 /* Layout invariants: both cores must agree bit-for-bit. */
 BUILD_ASSERT(sizeof(syn_ipc_msg_t) == 20, "syn_ipc_msg_t layout changed");
@@ -155,10 +169,9 @@ BUILD_ASSERT(SYN_SHM_PAYLOAD_OFFSET ==
 	     "payload must start right after the rings");
 
 /* The whole layout has to fit the shared region with payload space */
-BUILD_ASSERT(SYN_SHM_PAYLOAD_OFFSET +
-	     SYN_SHM_INFER_INPUT_SIZE + SYN_SHM_INFER_OUTPUT_SIZE <=
+BUILD_ASSERT(SYN_SHM_PAYLOAD_OFFSET + sizeof(syn_shm_infer_slot_t) <=
 	     SYN_SHM_SHARED_SIZE,
-	     "shared region too small for rings plus inference buffers");
+	     "shared region too small for rings plus inference slot");
 
 /* Map sanity: regions tile 0x20000000..0x20068000 without overlap */
 BUILD_ASSERT(SYN_SHM_CPU0_RAM_BASE + SYN_SHM_CPU0_RAM_SIZE ==
