@@ -17,8 +17,8 @@
 <p align="center">
   <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/github/v/release/Dimitrios-Kafetzis/SynapticOS?style=flat-square&color=blue" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square" alt="License"></a>
-  <a href="#roadmap"><img src="https://img.shields.io/badge/phase-2%20of%206-orange?style=flat-square" alt="Phase"></a>
-  <a href="#test-suite"><img src="https://img.shields.io/badge/tests-99%20passed-brightgreen?style=flat-square" alt="Tests"></a>
+  <a href="#roadmap"><img src="https://img.shields.io/badge/phase-3%20of%206-orange?style=flat-square" alt="Phase"></a>
+  <a href="#test-suite"><img src="https://img.shields.io/badge/tests-108%20passed-brightgreen?style=flat-square" alt="Tests"></a>
 </p>
 
 ---
@@ -70,7 +70,9 @@ Most RTOS platforms treat AI inference as an afterthought &mdash; a library bolt
 | **NPU/DSP Abstraction** | Clean HAL with full state machine (idle/busy/suspended). Swap between QEMU stubs and real Neutron NPU without changing application code. |
 | **Model Lifecycle** | Register, load, invoke, unload, unregister. Duplicate detection, state guards, metadata tracking. Foundation for OTA updates. |
 | **Inference Profiling** | Cycle-accurate timing of each pipeline stage (preprocess, NPU, postprocess). Memory peak tracking and NPU utilization metrics. |
-| **Interactive Shell** | Inspect runtime state over serial: `syn version`, `syn mem stats`, `syn model list`, `syn npu caps`, `syn prof last`. |
+| **Interactive Shell** | Inspect runtime state over serial: `syn version`, `syn mem stats`, `syn model list`, `syn npu caps`, `syn prof last`, `syn ipc status`, `syn mpu test`. |
+| **Dual-Core Offload** | The AI runtime runs on CPU0; CPU1 requests inference as an OS service over lock-free shared-memory rings (15 us typical round-trip, measured on the board). Includes CPU1 boot orchestration with blank-bank fallback and an out-of-tree CPU1 board port for Zephyr 3.7. |
+| **Cross-Core Protection** | CPU0's MPU guards CPU1's RAM read-only, with fault containment (offending thread aborted, both cores continue). One-directional by silicon: the MCXN947's CPU1 has no MPU. |
 | **Dual-Target Support** | Same codebase builds and runs on real hardware (FRDM-MCXN947) and emulated targets (QEMU Cortex-M3) for CI-friendly development. |
 
 ## Target Hardware
@@ -115,7 +117,7 @@ west flash
 ### Expected Output
 
 ```
-[00:00:00.000,000] <inf> hello_inference: === SynapticOS 0.2.0 — Hello Inference ===
+[00:00:00.000,000] <inf> hello_inference: === SynapticOS 0.3.0 — Hello Inference ===
 [00:00:00.000,000] <inf> hello_inference: Registered model 'test_classify' (handle=1)
 [00:00:00.000,000] <inf> hello_inference: Model loaded to NPU
 [00:00:00.000,000] <inf> hello_inference: Input tensor: 1x16x16x3 (768 bytes)
@@ -130,15 +132,16 @@ west flash
 
 ```bash
 west twister -T synaptic-os/tests/unit -p qemu_cortex_m3
-# 99 tests, 13 suites, 100% pass rate
+# 108 tests, 13 suites, 100% pass rate
 ```
 
 ## Build Footprint
 
-| Target | Flash | RAM |
-|--------|-------|-----|
-| FRDM-MCXN947 | 88 KB | 201 KB |
-| QEMU Cortex-M3 | 28 KB | 30 KB |
+| Build | Target | Flash | RAM |
+|-------|--------|-------|-----|
+| dual_model (CPU0: runtime, shell, serving) | FRDM-MCXN947 | 98.9 KB | 205.9 KB |
+| dual_model (CPU1: remote client) | FRDM-MCXN947 | 32.4 KB | 42.6 KB of 64 KB |
+| hello_inference | QEMU Cortex-M3 | 42 KB | 30 KB |
 
 ## Project Structure
 
@@ -154,9 +157,12 @@ synaptic-os/
 │   └── postprocess/        Classification, detection output processing
 ├── samples/
 │   ├── hello_inference/    End-to-end inference demo
-│   └── face_detection/     Continuous vision-pipeline demo
-├── tests/unit/             99 unit tests across 13 suites
-├── boards/nxp/             Device tree overlays and board configs
+│   ├── face_detection/     Continuous vision-pipeline demo
+│   └── dual_model/         Cross-core inference demo (CPU0 runtime + CPU1 remote client)
+├── tests/unit/             108 unit tests across 13 suites
+├── boards/nxp/
+│   ├── frdm_mcxn947/       Device tree overlays and board configs (CPU0)
+│   └── frdm_mcxn947_cpu1/  Out-of-tree CPU1 board port (missing from mainline Zephyr 3.7)
 ├── scripts/                Environment setup and validation
 └── docs/                   Guides and specifications
 ```
@@ -169,16 +175,16 @@ SynapticOS is developed in six phases, each building on the previous:
   Phase 1        Phase 2         Phase 3        Phase 4       Phase 5        Phase 6
   Foundation     Inference       Dual-Core      Model         Production     Ecosystem
                  Pipeline        & IPC          Lifecycle     Hardening      & Tooling
-  ─────●─────────────●────────────○──────────────○─────────────○──────────────○───▶
+  ─────●─────────────●────────────●──────────────○─────────────○──────────────○───▶
   v0.1.0         v0.2.0         v0.3.0         v0.4.0        v0.5.0         v1.0.0
-  ✓ Complete    ✓ Complete
+  ✓ Complete    ✓ Complete    ✓ Complete
 ```
 
 | Phase | Focus | Version |
 |-------|-------|---------|
 | **1. Foundation** | Memory, HAL, model registry, profiling, shell, tests | **v0.1.0** ✓ |
 | **2. Inference Pipeline** | Pipeline engine, priority job scheduler, PowerQuad DSP, pre/post-processors, live profiling | **v0.2.0** ✓ |
-| 3. Dual-Core & IPC | Asymmetric multiprocessing, shared-memory IPC | v0.3.0 |
+| **3. Dual-Core & IPC** | Asymmetric multiprocessing, lock-free shared-memory IPC, cross-core inference offload, MPU protection, CPU1 board port | **v0.3.0** ✓ |
 | 4. Model Lifecycle | OTA updates, A/B flash slots, model versioning | v0.4.0 |
 | 5. Production Hardening | Watchdog, fault recovery, soak testing, benchmarks | v0.5.0 |
 | 6. Ecosystem & Tooling | Model packaging tools, docs site, SDK, v1.0 release | v1.0.0 |
@@ -193,7 +199,7 @@ SynapticOS is developed in six phases, each building on the previous:
 
 ## Contributing
 
-SynapticOS is in active early development. Community contributions will open in Phase 3 with proper guidelines, issue templates, and a contributor guide.
+SynapticOS is in active early development. Community contributions will open in an upcoming phase with proper guidelines, issue templates, and a contributor guide.
 
 **In the meantime, you can:**
 
