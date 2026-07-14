@@ -238,3 +238,47 @@ ZTEST(syn_ipc_suite, test_ring_index_wraparound)
 	zassert_true(test_ring.head < SYN_IPC_RING_ENTRIES,
 		     "head did not wrap");
 }
+
+/* R3-1: ring operation cost. Producer and consumer both run here, so
+ * one iteration = push + pop + integrity check overhead; push and pop
+ * are also timed separately over a full ring's worth of messages.
+ */
+ZTEST(syn_ipc_suite, test_ring_bench)
+{
+	syn_ipc_msg_t msg = make_msg(7);
+	uint32_t start, cycles;
+	const int iters = 10000;
+
+	start = k_cycle_get_32();
+	for (int i = 0; i < iters; i++) {
+		(void)syn_ipc_ring_push(&test_ring, &msg);
+		(void)syn_ipc_ring_pop(&test_ring, &msg);
+	}
+	cycles = k_cycle_get_32() - start;
+
+	TC_PRINT("=== R3-1: SPSC ring push+pop cost ===\n");
+	TC_PRINT("  Iterations:  %d round-trips\n", iters);
+	TC_PRINT("  Total:       %u cycles (%u us)\n", cycles,
+		 k_cyc_to_us_ceil32(cycles));
+	TC_PRINT("  Per op pair: %u cycles (%u ns)\n", cycles / iters,
+		 (uint32_t)((uint64_t)k_cyc_to_ns_ceil64(cycles) / iters));
+
+	/* Separate push and pop passes across a full ring */
+	start = k_cycle_get_32();
+	for (uint32_t i = 0; i < SYN_IPC_RING_ENTRIES; i++) {
+		(void)syn_ipc_ring_push(&test_ring, &msg);
+	}
+	cycles = k_cycle_get_32() - start;
+	TC_PRINT("  Push only:   %u cycles avg\n",
+		 cycles / SYN_IPC_RING_ENTRIES);
+
+	start = k_cycle_get_32();
+	for (uint32_t i = 0; i < SYN_IPC_RING_ENTRIES; i++) {
+		(void)syn_ipc_ring_pop(&test_ring, &msg);
+	}
+	cycles = k_cycle_get_32() - start;
+	TC_PRINT("  Pop only:    %u cycles avg\n",
+		 cycles / SYN_IPC_RING_ENTRIES);
+
+	zassert_true(syn_ipc_ring_is_empty(&test_ring), "residue");
+}
