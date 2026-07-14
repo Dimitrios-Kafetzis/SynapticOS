@@ -26,6 +26,10 @@ zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_DUAL_CORE
     src/core/syn_ipc.c
 )
 
+zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_MPU_PROTECT
+    src/core/syn_mpu.c
+)
+
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_SHELL
     src/core/syn_shell.c
 )

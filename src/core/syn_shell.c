@@ -14,6 +14,10 @@
 
 #include "../hal/common/syn_dsp_soft.h"
 
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+#include "syn_mpu_internal.h"
+#endif
+
 /* syn version */
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -340,6 +344,31 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+/* syn mpu test */
+static int cmd_mpu_test(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Running cross-core MPU self-test "
+			"(a MemManage fault dump below is EXPECTED)...");
+
+	int ret = syn_mpu_selftest();
+
+	if (ret == 0) {
+		shell_print(sh, "MPU self-test PASS: shared region writable, "
+				"cross-core write faulted");
+	} else if (ret == -EPERM) {
+		shell_error(sh, "MPU self-test FAIL: cross-core write was "
+				"NOT blocked");
+	} else {
+		shell_error(sh, "MPU self-test error: %d", ret);
+	}
+	return ret;
+}
+#endif /* CONFIG_SYNAPTIC_MPU_PROTECT */
+
 /* Subcommand trees */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_mem,
 	SHELL_CMD(stats, NULL, "Show memory statistics", cmd_mem_stats),
@@ -376,6 +405,15 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_infer,
 	SHELL_SUBCMD_SET_END
 );
 
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_mpu,
+	SHELL_CMD(test, NULL,
+		  "Verify cross-core MPU protection (provokes a fault)",
+		  cmd_mpu_test),
+	SHELL_SUBCMD_SET_END
+);
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(version, NULL, "Print SynapticOS version", cmd_version),
 	SHELL_CMD(mem, &sub_mem, "Memory management", NULL),
@@ -384,6 +422,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(dsp, &sub_dsp, "DSP operations", NULL),
 	SHELL_CMD(infer, &sub_infer, "Inference control", NULL),
 	SHELL_CMD(prof, &sub_prof, "Profiling", NULL),
+#ifdef CONFIG_SYNAPTIC_MPU_PROTECT
+	SHELL_CMD(mpu, &sub_mpu, "Cross-core memory protection", NULL),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 
