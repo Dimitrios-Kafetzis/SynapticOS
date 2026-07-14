@@ -7,10 +7,17 @@
  * flashed to flash bank 1). CPU0 releases this core after publishing
  * the shared IPC region.
  *
- * Boot handshake: attach to the shared region (retrying briefly in
- * case of reset races), send SYN_IPC_STATUS_REQ, then keep a 1 Hz
- * heartbeat going. CPU1 has no console; its liveness is visible on
- * CPU0 via 'syn ipc status'.
+ * Application logic: after the boot handshake, alternate cross-core
+ * inference between the two models CPU0 serves:
+ *  - face_detect: 96x96x3 frame (synthetic camera pattern),
+ *    REALTIME priority
+ *  - keyword_spot: 49x10 MFCC window (synthetic audio pattern),
+ *    NORMAL priority
+ *
+ * CPU1 has no console; progress is visible on CPU0 ('syn ipc
+ * status' shows served counts and every 100th serve is logged).
+ * A 1 Hz STATUS_REQ heartbeat rides alongside the inference
+ * traffic so the link state stays fresh.
  */
 
 #include <zephyr/kernel.h>
@@ -21,37 +28,50 @@
 
 #define SYN_SHARED_NODE DT_NODELABEL(syn_shared)
 
-/* Smoke-test the cross-core inference protocol once at boot: resolve
- * the face_detect model and run a single request. The result is
- * reported to CPU0 implicitly (its console logs the served request);
- * a local failure just skips ahead to the heartbeat loop.
- */
-static void infer_smoke_test(void)
+#define FACE_INPUT_LEN  (96 * 96 * 3)
+#define FACE_OUTPUT_LEN 144
+#define KWS_INPUT_LEN   (49 * 10)
+#define KWS_OUTPUT_LEN  12
+
+static uint8_t output_buf[FACE_OUTPUT_LEN]; /* largest of the two */
+
+static void heartbeat(void)
 {
-	syn_model_handle_t model;
-	static uint8_t output[144];
-	size_t in_cap = 0, out_len = 0;
-	const size_t in_len = 96 * 96 * 3;
+	syn_ipc_msg_t req = {
+		.msg_id = 0, /* auto-assigned */
+		.type = SYN_IPC_STATUS_REQ,
+	};
 
-	if (syn_remote_model_lookup("face_detect", 500, &model) != 0) {
-		return;
+	(void)syn_ipc_send(&req);
+
+	/* Drain responses; correctness is judged on CPU0 */
+	syn_ipc_msg_t msg;
+
+	while (syn_ipc_receive(&msg, 10) == 0) {
 	}
+}
 
-	/* CPU1 has 64 KB of RAM: stage the frame zero-copy in the
-	 * shared slot instead of a private 27 KB buffer.
+static int run_one(syn_model_handle_t model, size_t in_len,
+		   size_t out_len, syn_priority_t prio, uint32_t seed)
+{
+	size_t in_cap = 0;
+	size_t got = 0;
+
+	/* Zero-copy staging: CPU1's 64 KB RAM cannot hold a private
+	 * 27 KB frame buffer, so patterns render straight into the
+	 * shared slot.
 	 */
 	uint8_t *input = syn_remote_infer_input(&in_cap);
 
 	if (input == NULL || in_cap < in_len) {
-		return;
+		return -ENOMEM;
 	}
 	for (size_t i = 0; i < in_len; i++) {
-		input[i] = (uint8_t)(i & 0xFF);
+		input[i] = (uint8_t)((i + seed) & 0xFF);
 	}
 
-	(void)syn_remote_infer(model, input, in_len,
-			       output, sizeof(output), &out_len,
-			       SYN_PRIORITY_NORMAL, 1000);
+	return syn_remote_infer(model, input, in_len,
+				output_buf, out_len, &got, prio, 1000);
 }
 
 int main(void)
@@ -70,35 +90,60 @@ int main(void)
 		}
 	}
 	if (ret != 0) {
-		/* No shared region: nothing useful to do without CPU0 */
+		/* No shared region: nothing useful without CPU0 */
 		for (;;) {
 			k_sleep(K_FOREVER);
 		}
 	}
 
-	infer_smoke_test();
+	/* Announce ourselves before the inference traffic starts */
+	heartbeat();
 
-	/* Handshake, then 1 Hz heartbeat */
+	/* Resolve both models on CPU0 (retry until it has registered
+	 * them; its runtime may still be starting up).
+	 */
+	syn_model_handle_t face = SYN_MODEL_INVALID;
+	syn_model_handle_t kws = SYN_MODEL_INVALID;
+
+	for (int i = 0; i < 50 && face == SYN_MODEL_INVALID; i++) {
+		if (syn_remote_model_lookup("face_detect", 200, &face) != 0) {
+			face = SYN_MODEL_INVALID;
+			k_sleep(K_MSEC(100));
+		}
+	}
+	(void)syn_remote_model_lookup("keyword_spot", 200, &kws);
+
+	if (face == SYN_MODEL_INVALID || kws == SYN_MODEL_INVALID) {
+		/* Keep the heartbeat alive so CPU0 can still see us */
+		for (;;) {
+			heartbeat();
+			k_sleep(K_MSEC(1000));
+		}
+	}
+
+	/* Alternate the two models with different priorities. The
+	 * "camera" gets REALTIME, the "microphone" NORMAL, matching
+	 * the phase plan's concurrent-priorities demo.
+	 */
+	uint32_t cycle = 0;
+
 	for (;;) {
-		syn_ipc_msg_t req = {
-			.msg_id = 0, /* auto-assigned */
-			.type = SYN_IPC_STATUS_REQ,
-			.priority = 0,
-			.payload_len = 0,
-			.payload_offset = 0,
-			.status = 0,
-		};
-
-		(void)syn_ipc_send(&req);
-
-		/* Drain any responses; correctness is judged on CPU0 */
-		syn_ipc_msg_t msg;
-
-		while (syn_ipc_receive(&msg, 100) == 0) {
-			/* STATUS_RESP consumed; nothing else expected yet */
+		if ((cycle & 1U) == 0U) {
+			(void)run_one(face, FACE_INPUT_LEN, FACE_OUTPUT_LEN,
+				      SYN_PRIORITY_REALTIME, cycle);
+		} else {
+			(void)run_one(kws, KWS_INPUT_LEN, KWS_OUTPUT_LEN,
+				      SYN_PRIORITY_NORMAL, cycle);
 		}
 
-		k_sleep(K_MSEC(900));
+		cycle++;
+
+		/* 1 Hz heartbeat woven into the inference cadence */
+		if ((cycle % 20U) == 0U) {
+			heartbeat();
+		}
+
+		k_sleep(K_MSEC(50));
 	}
 
 	return 0;

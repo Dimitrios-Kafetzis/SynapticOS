@@ -218,6 +218,10 @@ int syn_remote_infer(syn_model_handle_t model,
 
 #else /* CPU0: serve side */
 
+static uint32_t serve_count;
+static uint32_t serve_errors;
+static uint64_t serve_total_us;
+
 static void model_load_handler(const syn_ipc_msg_t *msg, void *ctx)
 {
 	ARG_UNUSED(ctx);
@@ -282,7 +286,11 @@ static void infer_req_handler(const syn_ipc_msg_t *msg, void *ctx)
 	}
 	memcpy(input->data, slot->input, slot->input_len);
 
+	uint32_t t0 = k_cycle_get_32();
+
 	ret = syn_infer_run_sync(slot->model, input, &output, prio);
+
+	uint32_t elapsed_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
 
 	if (ret == 0) {
 		if (output.size > SYN_SHM_INFER_OUTPUT_SIZE) {
@@ -295,7 +303,20 @@ static void infer_req_handler(const syn_ipc_msg_t *msg, void *ctx)
 
 	syn_mem_reset_ephemeral();
 
+	if (ret == 0) {
+		serve_count++;
+		serve_total_us += elapsed_us;
+		if (serve_count % 100U == 1U) {
+			LOG_INF("Served #%u: model %u prio %u in %u us "
+				"(%u out bytes)", serve_count, slot->model,
+				prio, elapsed_us, slot->output_len);
+		}
+	}
+
 respond:
+	if (ret != 0) {
+		serve_errors++;
+	}
 	slot->infer_status = ret;
 
 	syn_ipc_msg_t resp = {
@@ -334,6 +355,22 @@ int syn_remote_serve_init(void)
 		LOG_INF("Cross-core inference serving enabled");
 	}
 	return ret;
+}
+
+uint32_t syn_remote_serve_count(void)
+{
+	return serve_count;
+}
+
+uint32_t syn_remote_serve_errors(void)
+{
+	return serve_errors;
+}
+
+uint32_t syn_remote_serve_avg_us(void)
+{
+	return (serve_count > 0U)
+	       ? (uint32_t)(serve_total_us / serve_count) : 0U;
 }
 
 #endif /* CONFIG_SOC_MCXN947_CPU1 */

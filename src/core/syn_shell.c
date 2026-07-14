@@ -20,6 +20,7 @@
 
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
 #include "syn_boot_internal.h"
+#include "syn_infer_remote.h"
 #endif
 
 /* syn version */
@@ -365,6 +366,9 @@ static int cmd_ipc_status(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "STATUS_REQ answered: %u",
 		    syn_boot_status_req_count());
+	shell_print(sh, "Inferences served: %u (errors %u, avg %u us)",
+		    syn_remote_serve_count(), syn_remote_serve_errors(),
+		    syn_remote_serve_avg_us());
 	return 0;
 }
 #endif /* CONFIG_SYNAPTIC_DUAL_CORE && !CPU1 */

@@ -40,6 +40,15 @@ extern "C" {
  */
 int syn_remote_serve_init(void);
 
+/** CPU0: number of cross-core inferences served successfully. */
+uint32_t syn_remote_serve_count(void);
+
+/** CPU0: number of cross-core inference requests that failed. */
+uint32_t syn_remote_serve_errors(void);
+
+/** CPU0: average serve latency in microseconds (0 if none yet). */
+uint32_t syn_remote_serve_avg_us(void);
+
 /**
  * @brief CPU1: resolve a model name to a handle on CPU0.
  *
