@@ -98,7 +98,15 @@ typedef struct {
 	uint32_t shared_size;    /**< Region size CPU0 initialized with   */
 	volatile uint32_t cpu0_ready; /**< CPU0 runtime + IPC ready       */
 	volatile uint32_t cpu1_ready; /**< CPU1 IPC attached              */
-	uint32_t reserved[10];   /**< Pad control block to 64 bytes      */
+	/* IPC round-trip stats, measured by CPU1 (REQ send to RESP
+	 * handler, cycle counter) and read out via CPU0's shell since
+	 * CPU1 has no console.
+	 */
+	volatile uint32_t rtt_last_us;
+	volatile uint32_t rtt_min_us;
+	volatile uint32_t rtt_max_us;
+	volatile uint32_t rtt_count;
+	uint32_t reserved[6];    /**< Pad control block to 64 bytes      */
 } syn_shm_ctrl_t;
 
 /**

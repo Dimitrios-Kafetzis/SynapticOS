@@ -25,8 +25,42 @@
 #include <synaptic/syn_ipc.h>
 
 #include "syn_infer_remote.h"
+#include "syn_shared_layout.h"
 
 #define SYN_SHARED_NODE DT_NODELABEL(syn_shared)
+
+/* Round-trip measurement: heartbeat() stamps hb_sent_cycles before
+ * sending STATUS_REQ; the RESP handler (IPC dispatch thread, no
+ * queue hop, no tick quantization) computes the delta and publishes
+ * min/max/last into the shared control block for CPU0's
+ * 'syn ipc status' to display.
+ */
+static volatile syn_shm_ctrl_t *shm_ctrl;
+static volatile uint32_t hb_sent_cycles;
+
+static void status_resp_handler(const syn_ipc_msg_t *msg, void *ctx)
+{
+	ARG_UNUSED(msg);
+	ARG_UNUSED(ctx);
+
+	uint32_t sent = hb_sent_cycles;
+
+	if (sent == 0U || shm_ctrl == NULL) {
+		return;
+	}
+	hb_sent_cycles = 0;
+
+	uint32_t rtt = k_cyc_to_us_ceil32(k_cycle_get_32() - sent);
+
+	shm_ctrl->rtt_last_us = rtt;
+	if (shm_ctrl->rtt_count == 0U || rtt < shm_ctrl->rtt_min_us) {
+		shm_ctrl->rtt_min_us = rtt;
+	}
+	if (rtt > shm_ctrl->rtt_max_us) {
+		shm_ctrl->rtt_max_us = rtt;
+	}
+	shm_ctrl->rtt_count++;
+}
 
 #define FACE_INPUT_LEN  (96 * 96 * 3)
 #define FACE_OUTPUT_LEN 144
@@ -42,9 +76,10 @@ static void heartbeat(void)
 		.type = SYN_IPC_STATUS_REQ,
 	};
 
+	hb_sent_cycles = k_cycle_get_32();
 	(void)syn_ipc_send(&req);
 
-	/* Drain responses; correctness is judged on CPU0 */
+	/* Drain any queued messages; RESPs go to the handler */
 	syn_ipc_msg_t msg;
 
 	while (syn_ipc_receive(&msg, 10) == 0) {
@@ -95,6 +130,10 @@ int main(void)
 			k_sleep(K_FOREVER);
 		}
 	}
+
+	shm_ctrl = &((syn_shm_region_t *)shm_base)->ctrl;
+	(void)syn_ipc_register_handler(SYN_IPC_STATUS_RESP,
+				       status_resp_handler, NULL);
 
 	/* Announce ourselves before the inference traffic starts */
 	heartbeat();
