@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
-project(synaptic-os VERSION 0.2.0 LANGUAGES C)
+project(synaptic-os VERSION 0.3.0 LANGUAGES C)
 
 zephyr_library_named(synaptic_os)
 
