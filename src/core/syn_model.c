@@ -9,12 +9,30 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/crc.h>
 
 LOG_MODULE_REGISTER(syn_model, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #include <synaptic/syn_model.h>
 #include <synaptic/syn_hal_npu.h>
 #include <string.h>
+
+#include "syn_model_internal.h"
+
+#ifdef CONFIG_SYNAPTIC
+#include "syn_infer_internal.h"
+#define infer_quiesce() syn_infer_quiesce()
+#define infer_release() syn_infer_release()
+#else
+#define infer_quiesce() do {} while (0)
+#define infer_release() do {} while (0)
+#endif
+
+/* Serializes NPU residency changes (load/swap); dispatch of queued
+ * inference jobs is paused via the infer quiesce gate meanwhile.
+ */
+static K_MUTEX_DEFINE(residency_gate);
+static uint32_t last_swap_us;
 
 #ifndef CONFIG_SYNAPTIC_MAX_MODELS
 #define CONFIG_SYNAPTIC_MAX_MODELS 8
@@ -142,19 +160,28 @@ int syn_model_list(syn_model_handle_t *handles, uint8_t *count, uint8_t max)
 	return 0;
 }
 
-int syn_model_load(syn_model_handle_t handle)
+/* Residency-gate-free core of load; callers hold residency_gate. */
+static int model_do_load(int idx)
 {
-	int idx = handle_to_index(handle);
-
-	if (idx < 0 || !slots[idx].active) {
-		return -EINVAL;
-	}
-	if (slots[idx].loaded) {
-		return -EALREADY;
-	}
-
 	/* If model data is available, load into NPU HAL */
 	if (slots[idx].model_data != NULL && slots[idx].model_data_size > 0) {
+		/* Integrity gate: flash-backed models carry the payload
+		 * CRC32 in their registry entry; verify on every load.
+		 */
+		if (slots[idx].info.crc32 != 0U) {
+			uint32_t crc = crc32_ieee(slots[idx].model_data,
+						  slots[idx].model_data_size);
+
+			if (crc != slots[idx].info.crc32) {
+				LOG_ERR("CRC mismatch for '%s': "
+					"stored 0x%08x computed 0x%08x, "
+					"refusing to load",
+					slots[idx].info.name,
+					slots[idx].info.crc32, crc);
+				return -EILSEQ;
+			}
+		}
+
 		int ret = syn_hal_npu_load_model(slots[idx].model_data,
 						 slots[idx].model_data_size);
 		if (ret != 0) {
@@ -167,6 +194,27 @@ int syn_model_load(syn_model_handle_t handle)
 	slots[idx].loaded = true;
 	LOG_INF("Loaded model '%s'", slots[idx].info.name);
 	return 0;
+}
+
+int syn_model_load(syn_model_handle_t handle)
+{
+	int idx = handle_to_index(handle);
+
+	if (idx < 0 || !slots[idx].active) {
+		return -EINVAL;
+	}
+	if (slots[idx].loaded) {
+		return -EALREADY;
+	}
+
+	k_mutex_lock(&residency_gate, K_FOREVER);
+	infer_quiesce();
+
+	int ret = model_do_load(idx);
+
+	infer_release();
+	k_mutex_unlock(&residency_gate);
+	return ret;
 }
 
 int syn_model_unload(syn_model_handle_t handle)
@@ -196,19 +244,74 @@ bool syn_model_is_loaded(syn_model_handle_t handle)
 	return slots[idx].loaded;
 }
 
+int syn_model_set_data(syn_model_handle_t handle,
+		       const uint8_t *data, size_t size)
+{
+	int idx = handle_to_index(handle);
+
+	if (idx < 0 || !slots[idx].active) {
+		return -EINVAL;
+	}
+	if (data != NULL && size == 0U) {
+		return -EINVAL;
+	}
+
+	slots[idx].model_data = data;
+	slots[idx].model_data_size = (data != NULL) ? size : 0U;
+	return 0;
+}
+
+void syn_model_reset_all(void)
+{
+	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_MODELS; i++) {
+		if (slots[i].active && slots[i].loaded) {
+			syn_model_unload((syn_model_handle_t)(i + 1));
+		}
+	}
+	memset(slots, 0, sizeof(slots));
+}
+
 int syn_model_swap(syn_model_handle_t old_handle, syn_model_handle_t new_handle)
 {
 	int old_idx = handle_to_index(old_handle);
 	int new_idx = handle_to_index(new_handle);
 
-	if (old_idx < 0 || new_idx < 0 ||
+	if (old_idx < 0 || new_idx < 0 || old_idx == new_idx ||
 	    !slots[old_idx].active || !slots[new_idx].active) {
 		return -EINVAL;
 	}
 
+	uint32_t t0 = k_cycle_get_32();
+
+	/* Wait for the in-flight inference (never interrupt it) and
+	 * keep queued jobs parked until the new model is resident.
+	 */
+	k_mutex_lock(&residency_gate, K_FOREVER);
+	infer_quiesce();
+
 	slots[old_idx].loaded = false;
-	slots[new_idx].loaded = true;
-	LOG_INF("Swapped model '%s' -> '%s'",
-		slots[old_idx].info.name, slots[new_idx].info.name);
+
+	int ret = slots[new_idx].loaded ? 0 : model_do_load(new_idx);
+
+	infer_release();
+	k_mutex_unlock(&residency_gate);
+
+	last_swap_us = k_cyc_to_us_floor32(k_cycle_get_32() - t0);
+
+	if (ret != 0) {
+		LOG_ERR("Swap '%s' -> '%s' failed: %d (no model loaded)",
+			slots[old_idx].info.name, slots[new_idx].info.name,
+			ret);
+		return ret;
+	}
+
+	LOG_INF("Swapped model '%s' -> '%s' in %u us",
+		slots[old_idx].info.name, slots[new_idx].info.name,
+		last_swap_us);
 	return 0;
+}
+
+uint32_t syn_model_last_swap_us(void)
+{
+	return last_swap_us;
 }

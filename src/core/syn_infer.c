@@ -39,6 +39,7 @@ LOG_MODULE_REGISTER(syn_infer, CONFIG_SYNAPTIC_LOG_LEVEL);
 #include <string.h>
 
 #include "syn_prof_internal.h"
+#include "syn_infer_internal.h"
 
 #define SYN_MAX_PIPELINES      4
 #define STAGE_MIN_CAPACITY     64
@@ -100,6 +101,12 @@ static K_SEM_DEFINE(sched_wake, 0, CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS);
 static uint32_t next_job_id = 1;
 static uint32_t next_seq;
 static uint8_t max_concurrent = CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS;
+
+/* Quiesce gate (4.3): pauses dispatch for NPU residency changes. */
+static bool dispatch_paused;
+static bool job_running;
+static uint32_t deferred_wakes;
+static K_SEM_DEFINE(drain_sem, 0, 1);
 
 /* ------------------------------------------------------------------ */
 /* Pipeline construction (2.1)                                        */
@@ -558,6 +565,16 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 		k_sem_take(&sched_wake, K_FOREVER);
 
 		k_mutex_lock(&infer_lock, K_FOREVER);
+
+		if (dispatch_paused) {
+			/* Residency change in progress: leave the job
+			 * queued and replay this wakeup on release.
+			 */
+			deferred_wakes++;
+			k_mutex_unlock(&infer_lock);
+			continue;
+		}
+
 		struct infer_job *job = pick_next_job();
 
 		if (job == NULL) {
@@ -566,6 +583,7 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 		job->state = JOB_RUNNING;
+		job_running = true;
 		k_mutex_unlock(&infer_lock);
 
 		LOG_DBG("Job %u ('%s', prio %d) running",
@@ -580,13 +598,20 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 		k_mutex_lock(&infer_lock, K_FOREVER);
 		job->result = ret;
 		job->state = (ret == 0) ? JOB_DONE : JOB_ERROR;
+		job_running = false;
 
 		syn_infer_cb_t cb = job->params.callback;
 		void *user_data = job->params.user_data;
 		syn_job_id_t id = job->id;
 		syn_tensor_t output = job->output;
+		bool drain = dispatch_paused;
 
 		k_mutex_unlock(&infer_lock);
+
+		if (drain) {
+			/* a quiesce() is waiting for this job */
+			k_sem_give(&drain_sem);
+		}
 
 		/* Callback fires before the done semaphore so completions
 		 * are fully reported before any waiter resumes.
@@ -601,6 +626,36 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 
 K_THREAD_DEFINE(syn_sched_tid, SCHED_STACK_SIZE, scheduler_thread,
 		NULL, NULL, NULL, SCHED_THREAD_PRIO, 0, 0);
+
+void syn_infer_quiesce(void)
+{
+	k_mutex_lock(&infer_lock, K_FOREVER);
+	dispatch_paused = true;
+	k_sem_reset(&drain_sem);
+
+	bool busy = job_running;
+
+	k_mutex_unlock(&infer_lock);
+
+	if (busy) {
+		k_sem_take(&drain_sem, K_FOREVER);
+	}
+}
+
+void syn_infer_release(void)
+{
+	k_mutex_lock(&infer_lock, K_FOREVER);
+	dispatch_paused = false;
+
+	uint32_t replay = deferred_wakes;
+
+	deferred_wakes = 0;
+	k_mutex_unlock(&infer_lock);
+
+	while (replay-- > 0U) {
+		k_sem_give(&sched_wake);
+	}
+}
 
 syn_job_id_t syn_infer_submit(syn_pipeline_t *pipe,
 			      const syn_tensor_t *input,

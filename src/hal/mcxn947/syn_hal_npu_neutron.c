@@ -21,7 +21,13 @@ LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
  * #include <neutron.h>
  */
 
-#define NEUTRON_MAX_MODEL_SIZE    (256 * 1024)
+/* Stub-inference bound: the HAL only keeps an XIP pointer, so accept
+ * anything a flash model slot can hold (440 KB minus the .synm
+ * header). Board-found: the old arbitrary 256 KB cap rejected a
+ * valid slot-max OTA model AFTER it was stored and activated. The
+ * real bound comes with the Neutron SDK invoke path.
+ */
+#define NEUTRON_MAX_MODEL_SIZE    (440 * 1024 - 64)
 #define NEUTRON_MAX_INPUT_SIZE    (96 * 96 * 3)
 #define NEUTRON_MAX_OUTPUT_SIZE   256
 

@@ -32,6 +32,34 @@ extern "C" {
  */
 int syn_boot_secondary(void *shared_base, uint32_t timeout_ms);
 
+/**
+ * @brief Hold CPU1 in reset (clock gated).
+ *
+ * Used by the OTA engine before erasing or programming flash bank 1:
+ * CPU1 executes in place from that bank, and flash operations there
+ * disturb its instruction fetches. The shared-region ready flag and
+ * link state are cleared so a later resume re-runs the handshake.
+ * Only call with the cross-core offload quiescent (no in-flight
+ * remote jobs); messages still queued in the rings are handled late,
+ * after resume.
+ *
+ * @return 0 on success, -ENODEV if CPU1 was never booted.
+ */
+int syn_boot_secondary_stop(void);
+
+/**
+ * @brief Re-release CPU1 after syn_boot_secondary_stop().
+ *
+ * Re-runs the release sequence and waits for the ready flag and the
+ * STATUS_REQ handshake, like syn_boot_secondary(), but skips the
+ * blank check (the CPU1 image reserve is never touched by OTA) and
+ * does not re-register the auto-responder.
+ *
+ * @return 0 on success, -ENODEV if never booted, -ETIMEDOUT on
+ *         handshake timeout.
+ */
+int syn_boot_secondary_resume(uint32_t timeout_ms);
+
 /** True once the STATUS_REQ/RESP handshake has completed. */
 bool syn_boot_secondary_linked(void);
 

@@ -34,6 +34,18 @@
 
 #include <fsl_device_registers.h>
 
+#include "syn_flash_map.h"
+
+/* The bank-1 release target and blank-check window must stay inside
+ * the CPU1 image reserve of the OTA partition map: everything above
+ * it is erased/programmed at runtime by the model store.
+ */
+BUILD_ASSERT(SYN_BOOT_CPU1_VECTOR == SYN_PART_CPU1_IMG_OFFSET,
+	     "CPU1 vector table must sit at the CPU1 image partition base");
+BUILD_ASSERT(SYN_BOOT_CPU1_VECTOR + 32UL <=
+	     SYN_PART_CPU1_IMG_OFFSET + SYN_PART_CPU1_IMG_SIZE,
+	     "CPU1 blank-check window exceeds the CPU1 image partition");
+
 #ifdef CONFIG_SOC_FLASH_MCUX
 #include "fsl_flash.h" /* MCX ROM API: safe reads of possibly-blank flash */
 #endif
@@ -124,8 +136,12 @@ static bool cpu1_image_present(void)
 #endif
 }
 
+static int release_and_wait(uint32_t timeout_ms);
+
 int syn_boot_secondary(void *shared_base, uint32_t timeout_ms)
 {
+	static bool handler_registered;
+
 	if (shared_base == NULL || timeout_ms == 0U) {
 		return -EINVAL;
 	}
@@ -142,12 +158,20 @@ int syn_boot_secondary(void *shared_base, uint32_t timeout_ms)
 		return -EINVAL;
 	}
 
-	int ret = syn_ipc_register_handler(SYN_IPC_STATUS_REQ,
-					   status_req_handler, NULL);
-	if (ret != 0) {
-		return ret;
+	if (!handler_registered) {
+		int ret = syn_ipc_register_handler(SYN_IPC_STATUS_REQ,
+						   status_req_handler, NULL);
+		if (ret != 0) {
+			return ret;
+		}
+		handler_registered = true;
 	}
 
+	return release_and_wait(timeout_ms);
+}
+
+static int release_and_wait(uint32_t timeout_ms)
+{
 	LOG_INF("Releasing CPU1 (vector table at 0x%08lx)",
 		(unsigned long)SYN_BOOT_CPU1_VECTOR);
 
@@ -198,6 +222,44 @@ int syn_boot_secondary(void *shared_base, uint32_t timeout_ms)
 	handshake_us = k_cyc_to_us_floor32(k_cycle_get_32() - t_release);
 	LOG_INF("IPC handshake complete %u us after release", handshake_us);
 	return 0;
+}
+
+int syn_boot_secondary_stop(void)
+{
+	if (shm_ctrl == NULL) {
+		return -ENODEV; /* never booted */
+	}
+
+	/* Assert reset with the clock still running (the reset needs
+	 * clock edges to propagate), then gate the clock.
+	 */
+	uint32_t ctrl = SYSCON0->CPUCTRL | SYN_CPUCTRL_KEY;
+
+	SYSCON0->CPUCTRL = ctrl | SYSCON_CPUCTRL_CPU1CLKEN_MASK |
+			   SYSCON_CPUCTRL_CPU1RSTEN_MASK;
+	SYSCON0->CPUCTRL = (ctrl | SYSCON_CPUCTRL_CPU1RSTEN_MASK) &
+			   ~SYSCON_CPUCTRL_CPU1CLKEN_MASK;
+
+	shm_ctrl->cpu1_ready = 0;
+	atomic_set(&link_up, 0);
+
+	LOG_INF("CPU1 held in reset (bank 1 quiesced)");
+	return 0;
+}
+
+int syn_boot_secondary_resume(uint32_t timeout_ms)
+{
+	if (shm_ctrl == NULL) {
+		return -ENODEV;
+	}
+	if (timeout_ms == 0U) {
+		return -EINVAL;
+	}
+
+	shm_ctrl->cpu1_ready = 0;
+	atomic_set(&link_up, 0);
+
+	return release_and_wait(timeout_ms);
 }
 
 bool syn_boot_secondary_linked(void)

@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * SynapticOS flash partition map (generated; replaces the stock
+ * MCUboot partitions, whose slot1 straddles CPU1's XIP bank).
+ * The model store auto-initializes over this map at boot.
+ */
+
+#include "../../../boards/nxp/frdm_mcxn947/synaptic_partitions.overlay"

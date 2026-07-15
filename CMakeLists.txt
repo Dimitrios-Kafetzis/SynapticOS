@@ -37,6 +37,12 @@ zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_SHELL
     src/core/syn_shell.c
 )
 
+zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_MODEL_STORE
+    src/core/syn_model_store.c
+    src/core/syn_flash_port_ram.c
+    src/core/syn_flash_port_mcx.c
+)
+
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_OTA
     src/core/syn_model_ota.c
 )
