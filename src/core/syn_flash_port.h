@@ -61,6 +61,14 @@ int syn_flash_read(const syn_flash_port_t *p, uint32_t off,
 int syn_flash_write(const syn_flash_port_t *p, uint32_t off,
 		    const void *buf, size_t len);
 int syn_flash_erase(const syn_flash_port_t *p, uint32_t off, size_t len);
+/* Erase one sector per flash command with a scheduler breather in
+ * between. Large single-call erases (hundreds of KB) wedged the
+ * MCXN947 whole-chip during Phase 4 board bring-up (flash XIP and
+ * debug port dead, ISP-only recovery); every multi-sector erase
+ * must go through this instead of syn_flash_erase.
+ */
+int syn_flash_erase_sectors(const syn_flash_port_t *p, uint32_t off,
+			    size_t len);
 int syn_flash_is_blank(const syn_flash_port_t *p, uint32_t off, size_t len);
 const uint8_t *syn_flash_mmap(const syn_flash_port_t *p, uint32_t off);
 

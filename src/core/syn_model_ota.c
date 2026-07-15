@@ -167,7 +167,11 @@ int syn_ota_begin(const char *model_name, size_t total_size)
 	const syn_flash_port_t *port = syn_store_port();
 	uint32_t sector = port->sector_size;
 	uint32_t erase_len = (ota.total_size + sector - 1U) / sector * sector;
-	int ret = syn_flash_erase(port, slot_off, erase_len);
+
+	LOG_INF("Erasing staging slot %u: %u sectors",
+		slot, erase_len / sector);
+
+	int ret = syn_flash_erase_sectors(port, slot_off, erase_len);
 
 	if (ret != 0) {
 		k_mutex_unlock(&ota_lock);

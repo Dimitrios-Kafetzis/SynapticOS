@@ -640,8 +640,9 @@ int syn_store_install(const syn_model_info_t *info,
 	k_mutex_lock(&st.lock, K_FOREVER);
 
 	uint32_t off = st.lay.slot_off[slot];
-	int ret = syn_flash_erase(st.port, off,
-				  round_up(total, st.port->sector_size));
+	int ret = syn_flash_erase_sectors(st.port, off,
+					  round_up(total,
+						   st.port->sector_size));
 
 	if (ret != 0) {
 		k_mutex_unlock(&st.lock);

@@ -118,11 +118,23 @@ def main():
     fd = open_port(args.port, args.baud)
     sh = Shell(fd, args.verbose)
 
+    # Echoing kilobyte-long hex lines back (with the shell's full-line
+    # ANSI redraws) saturates the device TX at UART speed and stalls
+    # RX ingestion; disable echo for the duration of the transfer.
+    os.write(fd, b"shell echo off\n")
+    time.sleep(0.3)
+    termios.tcflush(fd, termios.TCIFLUSH)
+    sh.pending = b""
+
     print(f"sending '{name}' ({len(image)} bytes) to {args.port} "
           f"in {args.chunk}-byte chunks")
 
     t0 = time.monotonic()
-    sh.command(f"syn ota begin {name} {len(image)}", "OTA RX")
+    # begin erases the whole staging area sector by sector; scale the
+    # wait with the image size (~1 s per 50 KB is generous)
+    begin_timeout = max(10.0, len(image) / 51200)
+    sh.command(f"syn ota begin {name} {len(image)}", "OTA RX",
+               timeout=begin_timeout)
 
     sent = 0
     while sent < len(image):
@@ -145,6 +157,7 @@ def main():
     else:
         print("staged only; run 'syn ota activate' on the device")
 
+    os.write(fd, b"shell echo on\n")
     os.close(fd)
     return 0
 

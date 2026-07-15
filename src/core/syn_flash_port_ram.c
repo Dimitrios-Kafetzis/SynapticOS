@@ -67,6 +67,32 @@ int syn_flash_erase(const syn_flash_port_t *p, uint32_t off, size_t len)
 	return p->erase(p, off, len);
 }
 
+int syn_flash_erase_sectors(const syn_flash_port_t *p, uint32_t off,
+			    size_t len)
+{
+	int ret = check_range(p, off, len);
+
+	if (ret != 0) {
+		return ret;
+	}
+	if ((off % p->sector_size) != 0U || (len % p->sector_size) != 0U) {
+		return -EINVAL;
+	}
+
+	for (size_t done = 0; done < len; done += p->sector_size) {
+		ret = p->erase(p, off + done, p->sector_size);
+		if (ret != 0) {
+			return ret;
+		}
+		/* one command per sector, then let the system run:
+		 * long uninterrupted erase sequences stalled the chip
+		 * on the board (see header)
+		 */
+		k_msleep(1);
+	}
+	return 0;
+}
+
 int syn_flash_is_blank(const syn_flash_port_t *p, uint32_t off, size_t len)
 {
 	int ret = check_range(p, off, len);
