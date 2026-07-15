@@ -34,6 +34,18 @@
 
 #include <fsl_device_registers.h>
 
+#include "syn_flash_map.h"
+
+/* The bank-1 release target and blank-check window must stay inside
+ * the CPU1 image reserve of the OTA partition map: everything above
+ * it is erased/programmed at runtime by the model store.
+ */
+BUILD_ASSERT(SYN_BOOT_CPU1_VECTOR == SYN_PART_CPU1_IMG_OFFSET,
+	     "CPU1 vector table must sit at the CPU1 image partition base");
+BUILD_ASSERT(SYN_BOOT_CPU1_VECTOR + 32UL <=
+	     SYN_PART_CPU1_IMG_OFFSET + SYN_PART_CPU1_IMG_SIZE,
+	     "CPU1 blank-check window exceeds the CPU1 image partition");
+
 #ifdef CONFIG_SOC_FLASH_MCUX
 #include "fsl_flash.h" /* MCX ROM API: safe reads of possibly-blank flash */
 #endif
