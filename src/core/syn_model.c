@@ -9,12 +9,15 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/crc.h>
 
 LOG_MODULE_REGISTER(syn_model, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #include <synaptic/syn_model.h>
 #include <synaptic/syn_hal_npu.h>
 #include <string.h>
+
+#include "syn_model_internal.h"
 
 #ifndef CONFIG_SYNAPTIC_MAX_MODELS
 #define CONFIG_SYNAPTIC_MAX_MODELS 8
@@ -155,6 +158,23 @@ int syn_model_load(syn_model_handle_t handle)
 
 	/* If model data is available, load into NPU HAL */
 	if (slots[idx].model_data != NULL && slots[idx].model_data_size > 0) {
+		/* Integrity gate: flash-backed models carry the payload
+		 * CRC32 in their registry entry; verify on every load.
+		 */
+		if (slots[idx].info.crc32 != 0U) {
+			uint32_t crc = crc32_ieee(slots[idx].model_data,
+						  slots[idx].model_data_size);
+
+			if (crc != slots[idx].info.crc32) {
+				LOG_ERR("CRC mismatch for '%s': "
+					"stored 0x%08x computed 0x%08x, "
+					"refusing to load",
+					slots[idx].info.name,
+					slots[idx].info.crc32, crc);
+				return -EILSEQ;
+			}
+		}
+
 		int ret = syn_hal_npu_load_model(slots[idx].model_data,
 						 slots[idx].model_data_size);
 		if (ret != 0) {
@@ -194,6 +214,33 @@ bool syn_model_is_loaded(syn_model_handle_t handle)
 	}
 
 	return slots[idx].loaded;
+}
+
+int syn_model_set_data(syn_model_handle_t handle,
+		       const uint8_t *data, size_t size)
+{
+	int idx = handle_to_index(handle);
+
+	if (idx < 0 || !slots[idx].active) {
+		return -EINVAL;
+	}
+	if (data != NULL && size == 0U) {
+		return -EINVAL;
+	}
+
+	slots[idx].model_data = data;
+	slots[idx].model_data_size = (data != NULL) ? size : 0U;
+	return 0;
+}
+
+void syn_model_reset_all(void)
+{
+	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_MODELS; i++) {
+		if (slots[i].active && slots[i].loaded) {
+			syn_model_unload((syn_model_handle_t)(i + 1));
+		}
+	}
+	memset(slots, 0, sizeof(slots));
 }
 
 int syn_model_swap(syn_model_handle_t old_handle, syn_model_handle_t new_handle)
