@@ -27,8 +27,17 @@
 #define TPAGE   128U
 #define TSLOT   8192U
 
-/* 2 x 1 KB registry copies + 2 x 8 KB slots */
-static uint8_t flash_mem[2U * TSECTOR + 2U * TSLOT];
+/* 2 x 1 KB registry copies + 2 x 8 KB slots. Shared with
+ * test_model_ota.c (same geometry) to stay inside QEMU's 64 KB RAM;
+ * the suites run sequentially and every fixture re-initializes it.
+ */
+uint8_t syn_test_flash_mem[2U * TSECTOR + 2U * TSLOT];
+syn_flash_port_t syn_test_port;
+syn_flash_ram_ctx_t syn_test_ram_ctx;
+
+#define flash_mem syn_test_flash_mem
+#define port      syn_test_port
+#define ram_ctx   syn_test_ram_ctx
 
 static const syn_store_layout_t lay = {
     .registry_off = { 0U, TSECTOR },
@@ -36,9 +45,6 @@ static const syn_store_layout_t lay = {
     .slot_off = { 2U * TSECTOR, 2U * TSECTOR + TSLOT },
     .slot_size = TSLOT,
 };
-
-static syn_flash_port_t port;
-static syn_flash_ram_ctx_t ram_ctx;
 
 static uint8_t payload[1200];
 
