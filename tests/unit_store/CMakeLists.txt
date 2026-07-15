@@ -9,6 +9,7 @@ project(synaptic_store_tests)
 target_sources(app PRIVATE
     test_model_store.c
     test_model_ota.c
+    test_model_swap.c
 )
 
 target_link_libraries(app PRIVATE synaptic_os)

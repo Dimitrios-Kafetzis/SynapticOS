@@ -494,11 +494,32 @@ int syn_store_activate(uint8_t slot)
 		return ret;
 	}
 
-	/* flash state is authoritative; now swing the RAM registry */
+	/* flash state is authoritative; now swing the RAM registry.
+	 * If the outgoing model was NPU-resident, hot-load the new one
+	 * in its place (waits out any in-flight inference).
+	 */
+	bool was_loaded = false;
+
 	if (old_active != SYN_STORE_SLOT_NONE) {
+		syn_model_handle_t oh;
+
+		if (syn_model_get_by_name(st.rec[old_active].name, &oh) == 0) {
+			was_loaded = syn_model_is_loaded(oh);
+		}
 		ram_unregister(old_active);
 	}
-	(void)ram_register(slot, NULL);
+
+	syn_model_handle_t nh = SYN_MODEL_INVALID;
+
+	(void)ram_register(slot, &nh);
+	if (was_loaded && nh != SYN_MODEL_INVALID) {
+		int lret = syn_model_load(nh);
+
+		if (lret != 0) {
+			LOG_WRN("Hot reload of '%s' failed: %d",
+				st.rec[slot].name, lret);
+		}
+	}
 
 	k_mutex_unlock(&st.lock);
 	return 0;
@@ -537,10 +558,28 @@ int syn_store_rollback(void)
 		return ret;
 	}
 
+	bool was_loaded = false;
+
 	if (cur != SYN_STORE_SLOT_NONE) {
+		syn_model_handle_t ch;
+
+		if (syn_model_get_by_name(st.rec[cur].name, &ch) == 0) {
+			was_loaded = syn_model_is_loaded(ch);
+		}
 		ram_unregister(cur);
 	}
-	(void)ram_register(prev, NULL);
+
+	syn_model_handle_t ph = SYN_MODEL_INVALID;
+
+	(void)ram_register(prev, &ph);
+	if (was_loaded && ph != SYN_MODEL_INVALID) {
+		int lret = syn_model_load(ph);
+
+		if (lret != 0) {
+			LOG_WRN("Hot reload of '%s' failed: %d",
+				st.rec[prev].name, lret);
+		}
+	}
 
 	k_mutex_unlock(&st.lock);
 	return 0;

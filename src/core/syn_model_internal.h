@@ -25,6 +25,11 @@ int syn_model_set_data(syn_model_handle_t handle,
 /* Drop every registration (test fixtures and store re-init). */
 void syn_model_reset_all(void);
 
+/* Duration of the most recent syn_model_swap(), microseconds
+ * (includes waiting out the in-flight inference).
+ */
+uint32_t syn_model_last_swap_us(void);
+
 #ifdef __cplusplus
 }
 #endif
