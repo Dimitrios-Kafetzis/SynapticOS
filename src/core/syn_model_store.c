@@ -799,3 +799,46 @@ const syn_store_layout_t *syn_store_layout_get(void)
 {
 	return st.ready ? &st.lay : NULL;
 }
+
+#if defined(CONFIG_SYNAPTIC_STORE_AUTO_INIT) && defined(CONFIG_SOC_FLASH_MCUX)
+/* Board auto-init: bring the store up over the partition-map window
+ * before main() so every FRDM application (including dual_model's
+ * shell-driven OTA) sees the persistent registry. Runs before CPU1
+ * is released, so scanning bank 1 is race-free. Never fails boot:
+ * a store problem degrades to "no persistent models", logged.
+ */
+#include <zephyr/init.h>
+#include "syn_flash_map.h"
+
+static int syn_store_auto_init(void)
+{
+	static syn_flash_port_t mcx_port;
+
+	if (syn_flash_port_mcx_init(&mcx_port) != 0) {
+		LOG_ERR("Store auto-init skipped: flash port unavailable");
+		return 0;
+	}
+
+	static const syn_store_layout_t map_layout = {
+		.registry_off = {
+			SYN_PART_REGISTRY_A_OFFSET - SYN_FLASH_WRITABLE_BASE,
+			SYN_PART_REGISTRY_B_OFFSET - SYN_FLASH_WRITABLE_BASE,
+		},
+		.registry_size = SYN_PART_REGISTRY_A_SIZE,
+		.slot_off = {
+			SYN_PART_SLOT_A_OFFSET - SYN_FLASH_WRITABLE_BASE,
+			SYN_PART_SLOT_B_OFFSET - SYN_FLASH_WRITABLE_BASE,
+		},
+		.slot_size = SYN_PART_SLOT_A_SIZE,
+	};
+
+	int ret = syn_store_init(&mcx_port, &map_layout);
+
+	if (ret != 0) {
+		LOG_ERR("Store auto-init failed: %d (no persistence)", ret);
+	}
+	return 0;
+}
+
+SYS_INIT(syn_store_auto_init, APPLICATION, 90);
+#endif /* CONFIG_SYNAPTIC_STORE_AUTO_INIT && CONFIG_SOC_FLASH_MCUX */

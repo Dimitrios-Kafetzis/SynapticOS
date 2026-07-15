@@ -24,6 +24,14 @@
 #include "syn_ipc_internal.h"
 #endif
 
+#ifdef CONFIG_SYNAPTIC_OTA
+#include <string.h>
+#include <zephyr/sys/util.h> /* hex2bin */
+#include <synaptic/syn_model_ota.h>
+#include "syn_model_ota_internal.h"
+#include "syn_model_store.h"
+#endif
+
 /* syn version */
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
@@ -408,6 +416,167 @@ static int cmd_mpu_test(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_SYNAPTIC_MPU_PROTECT */
 
+#ifdef CONFIG_SYNAPTIC_OTA
+/* syn store status */
+static int cmd_store_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!syn_store_ready()) {
+		shell_error(sh, "model store not initialized");
+		return -ENODEV;
+	}
+
+	shell_print(sh, "generation %u  active slot %u  staged slot %u",
+		    syn_store_generation(), syn_store_active_slot(),
+		    syn_store_staged_slot());
+	shell_print(sh, "registry wear: copy0 %u copy1 %u erases",
+		    syn_store_wear(0), syn_store_wear(1));
+	shell_print(sh, "last commit %u us, boot scan %u us",
+		    syn_store_last_commit_us(), syn_store_scan_us());
+
+	for (uint8_t s = 0; s < 2U; s++) {
+		syn_model_info_t info;
+
+		if (syn_store_slot_info(s, &info) == 0) {
+			shell_print(sh, "slot %u: '%s' %u bytes crc 0x%08x "
+				    "at 0x%08x", s, info.name,
+				    info.flash_size, info.crc32,
+				    info.flash_offset);
+		} else {
+			shell_print(sh, "slot %u: empty", s);
+		}
+	}
+	return 0;
+}
+
+/* syn ota status */
+static int cmd_ota_status(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	syn_ota_status_t st;
+
+	syn_ota_get_status(&st);
+	shell_print(sh, "state %s  slot %u  received %u/%u bytes",
+		    syn_ota_state_str(st.state), st.slot,
+		    st.received, st.total_size);
+	shell_print(sh, "session %u us  last error %d",
+		    st.session_us, st.last_error);
+	return 0;
+}
+
+/* syn ota begin <name> <total_size> */
+static int cmd_ota_begin(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	size_t total = (size_t)strtoul(argv[2], NULL, 0);
+	int ret = syn_ota_begin(argv[1], total);
+
+	if (ret != 0) {
+		shell_error(sh, "ota begin failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "OTA RX '%s' %u bytes", argv[1], (unsigned)total);
+	return 0;
+}
+
+/* syn ota data <hex>: one hex-encoded chunk (transport for the UART
+ * demo; the host sender is tools/syn_ota_send.py)
+ */
+static int cmd_ota_data(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	static uint8_t chunk[CONFIG_SHELL_CMD_BUFF_SIZE / 2];
+	size_t hexlen = strlen(argv[1]);
+
+	if (hexlen == 0U || (hexlen % 2U) != 0U ||
+	    hexlen / 2U > sizeof(chunk)) {
+		shell_error(sh, "bad hex chunk (%u chars)", (unsigned)hexlen);
+		return -EINVAL;
+	}
+
+	size_t n = hex2bin(argv[1], hexlen, chunk, sizeof(chunk));
+
+	if (n != hexlen / 2U) {
+		shell_error(sh, "hex decode failed");
+		return -EINVAL;
+	}
+
+	int ret = syn_ota_write_chunk(chunk, n);
+
+	if (ret != 0) {
+		shell_error(sh, "ota write failed: %d", ret);
+		return ret;
+	}
+
+	syn_ota_status_t st;
+
+	syn_ota_get_status(&st);
+	shell_print(sh, "ok %u/%u", st.received, st.total_size);
+	return 0;
+}
+
+/* syn ota done */
+static int cmd_ota_done(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = syn_ota_finish();
+
+	if (ret != 0) {
+		shell_error(sh, "ota finish failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "OTA staged and verified: state %s",
+		    syn_ota_state_str(syn_ota_get_state()));
+	return 0;
+}
+
+/* syn ota activate */
+static int cmd_ota_activate(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = syn_ota_activate();
+
+	if (ret != 0) {
+		shell_error(sh, "ota activate failed: %d", ret);
+		return ret;
+	}
+
+	syn_ota_status_t st;
+
+	syn_ota_get_status(&st);
+	shell_print(sh, "OTA activated (%u us since begin); active slot %u",
+		    st.session_us, syn_store_active_slot());
+	return 0;
+}
+
+/* syn ota rollback */
+static int cmd_ota_rollback(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = syn_ota_rollback();
+
+	if (ret != 0) {
+		shell_error(sh, "ota rollback failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "rolled back; active slot %u",
+		    syn_store_active_slot());
+	return 0;
+}
+#endif /* CONFIG_SYNAPTIC_OTA */
+
 /* Subcommand trees */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_mem,
 	SHELL_CMD(stats, NULL, "Show memory statistics", cmd_mem_stats),
@@ -460,6 +629,28 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ipc,
 );
 #endif
 
+#ifdef CONFIG_SYNAPTIC_OTA
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_store,
+	SHELL_CMD(status, NULL, "Show model store state", cmd_store_status),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_ota,
+	SHELL_CMD(status, NULL, "Show OTA session state", cmd_ota_status),
+	SHELL_CMD_ARG(begin, NULL, "Start OTA: syn ota begin <name> <bytes>",
+		      cmd_ota_begin, 3, 0),
+	SHELL_CMD_ARG(data, NULL, "Feed a hex-encoded chunk",
+		      cmd_ota_data, 2, 0),
+	SHELL_CMD(done, NULL, "Finish transfer: validate + stage",
+		  cmd_ota_done),
+	SHELL_CMD(activate, NULL, "Activate the staged model",
+		  cmd_ota_activate),
+	SHELL_CMD(rollback, NULL, "Restore the previous model",
+		  cmd_ota_rollback),
+	SHELL_SUBCMD_SET_END
+);
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(version, NULL, "Print SynapticOS version", cmd_version),
 	SHELL_CMD(mem, &sub_mem, "Memory management", NULL),
@@ -473,6 +664,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 #endif
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
 	SHELL_CMD(ipc, &sub_ipc, "Inter-core communication", NULL),
+#endif
+#ifdef CONFIG_SYNAPTIC_OTA
+	SHELL_CMD(store, &sub_store, "Model store", NULL),
+	SHELL_CMD(ota, &sub_ota, "OTA model updates", NULL),
 #endif
 	SHELL_SUBCMD_SET_END
 );

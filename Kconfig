@@ -80,6 +80,18 @@ config SYNAPTIC_MODEL_STORE
       the CPU1 image reserve; on QEMU a RAM-backed port emulates
       the flash so the logic is fully unit-testable.
 
+config SYNAPTIC_STORE_AUTO_INIT
+    bool "Initialize the model store automatically at boot"
+    depends on SYNAPTIC_MODEL_STORE
+    default y
+    help
+      On boards with the MCX ROM-API flash HAL, bring the model
+      store up over the generated partition map before main() so
+      persistent models reappear without application code. Runs
+      before CPU1 release; a failure only disables persistence.
+      QEMU targets have no backing flash and initialize a RAM port
+      explicitly instead.
+
 config SYNAPTIC_OTA
     bool "Enable OTA model updates"
     depends on SYNAPTIC_MODEL_STORE
