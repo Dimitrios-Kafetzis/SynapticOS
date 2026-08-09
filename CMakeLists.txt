@@ -8,6 +8,28 @@ project(synaptic-os VERSION 0.4.0 LANGUAGES C)
 
 zephyr_library_named(synaptic_os)
 
+if(CONFIG_SYNAPTIC_COVERAGE)
+    # Instrument ONLY src/core: blank the toolchain coverage property
+    # that arch/common applies tree-wide under CONFIG_COVERAGE (a
+    # fully instrumented image overflows the QEMU target by ~245 KB
+    # flash / ~128 KB RAM; even whole-library instrumentation is
+    # ~26 KB over), then add the real flags per source file. The
+    # embedded gcov runtime and console dump still come from Zephyr
+    # (CONFIG_COVERAGE_GCOV/DUMP). Coverage reporting targets
+    # src/core, so nothing is lost by the narrower scope.
+    set_property(TARGET compiler PROPERTY coverage "")
+    set_property(TARGET linker PROPERTY coverage "")
+    set(SYN_COV_GLOBS ${CONFIG_SYNAPTIC_COVERAGE_FILES})
+    separate_arguments(SYN_COV_GLOBS)
+    set(SYN_COV_SRCS "")
+    foreach(pat ${SYN_COV_GLOBS})
+        file(GLOB _syn_cov_m ${CMAKE_CURRENT_SOURCE_DIR}/src/core/${pat})
+        list(APPEND SYN_COV_SRCS ${_syn_cov_m})
+    endforeach()
+    set_source_files_properties(${SYN_COV_SRCS} PROPERTIES
+        COMPILE_OPTIONS "-fprofile-arcs;-ftest-coverage")
+endif()
+
 zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 

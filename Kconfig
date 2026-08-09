@@ -1,6 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SynapticOS Kconfig
 
+# Library-only gcov instrumentation. Global CONFIG_COVERAGE cannot
+# fit qemu_cortex_m3 (the instrumented image overflows flash by
+# ~245 KB and RAM by ~128 KB), so this instruments ONLY the
+# synaptic_os library and reuses Zephyr's embedded gcov runtime and
+# console dump. Harvest with tools/syn_coverage.sh.
+config SYNAPTIC_COVERAGE
+    bool "gcov-instrument the SynapticOS library"
+    depends on !NATIVE_BUILD
+    select FORCE_COVERAGE
+    select COVERAGE
+    select COVERAGE_DUMP
+
+config SYNAPTIC_COVERAGE_FILES
+    string "src/core file globs to instrument (space-separated)"
+    depends on SYNAPTIC_COVERAGE
+    default "*.c"
+    help
+      Counter RAM scales with instrumented code, and 64 KB QEMU
+      targets cannot always afford all of src/core next to the test
+      fixtures (tests/unit_store carries an 18 KB RAM flash). Each
+      coverage app narrows this to the files its suites exercise;
+      gcovr merges the runs into one report.
+
 menuconfig SYNAPTIC
     bool "SynapticOS AI Runtime"
     depends on SOC_SERIES_MCXNX4X || BOARD_QEMU_CORTEX_M3
