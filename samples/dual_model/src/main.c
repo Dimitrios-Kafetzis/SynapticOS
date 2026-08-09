@@ -94,7 +94,8 @@ static uint8_t demo_in_a[DEMO_IN_SIZE];
 static uint8_t demo_in_b[DEMO_IN_SIZE];
 
 static volatile int demo_done_count;
-static uint32_t demo_done_order[2];
+static uint32_t demo_done_order[4];
+static uint32_t demo_done_cyc[4];
 static uint32_t demo_rt_done_cyc;
 
 static void demo_cb(syn_job_id_t job, const syn_tensor_t *output,
@@ -108,8 +109,9 @@ static void demo_cb(syn_job_id_t job, const syn_tensor_t *output,
 	if (tag == 2U) {
 		demo_rt_done_cyc = k_cycle_get_32();
 	}
-	if (demo_done_count < 2) {
+	if (demo_done_count < 4) {
 		demo_done_order[demo_done_count] = tag;
+		demo_done_cyc[demo_done_count] = k_cycle_get_32();
 	}
 	demo_done_count++;
 }
@@ -194,6 +196,17 @@ static int cmd_demo_preempt(const struct shell *sh, size_t argc,
 		return ret;
 	}
 
+	/* The layered job computes on the scheduler thread without
+	 * ever blocking, so a lower-priority submitter would only get
+	 * the CPU back after the job completes and could never inject
+	 * the REALTIME job mid-run. Outrank the scheduler thread for
+	 * the demo (the QEMU tests do this implicitly: the ztest
+	 * thread is cooperative).
+	 */
+	int old_prio = k_thread_priority_get(k_current_get());
+
+	k_thread_priority_set(k_current_get(), K_PRIO_PREEMPT(2));
+
 	ret = syn_hal_npu_load_model(demo_blob, (size_t)demo_blob_size);
 	if (ret != 0) {
 		shell_error(sh, "layered blob load failed: %d", ret);
@@ -263,6 +276,7 @@ static int cmd_demo_preempt(const struct shell *sh, size_t argc,
 		.callback = demo_cb,
 		.user_data = (void *)1,
 	};
+	uint32_t n_submit_cyc = k_cycle_get_32();
 	syn_job_id_t jn = syn_infer_submit(pn, &ta, &np);
 
 	/* Land inside the NORMAL job (~8 layers x ~ms each) */
@@ -284,8 +298,8 @@ static int cmd_demo_preempt(const struct shell *sh, size_t argc,
 		goto restore;
 	}
 
-	(void)syn_infer_wait(jr, 5000);
-	(void)syn_infer_wait(jn, 5000);
+	int wait_r = syn_infer_wait(jr, 5000);
+	int wait_n = syn_infer_wait(jn, 5000);
 
 	syn_tensor_t rn, rr;
 	int ret_n, ret_r;
@@ -293,6 +307,17 @@ static int cmd_demo_preempt(const struct shell *sh, size_t argc,
 	ret_r = syn_infer_get_result(jr, &rr);
 	ret_n = syn_infer_get_result(jn, &rn);
 	syn_infer_get_stats(&st1);
+
+	shell_print(sh, "diag: jn=%u jr=%u wait n/r=%d/%d result n/r="
+		    "%d/%d cb_count=%d", jn, jr, wait_n, wait_r,
+		    ret_n, ret_r, demo_done_count);
+	for (int i = 0; i < demo_done_count && i < 4; i++) {
+		shell_print(sh, "diag: cb[%d] tag=%u at +%u us "
+			    "(from NORMAL submit)", i,
+			    demo_done_order[i],
+			    k_cyc_to_us_ceil32(demo_done_cyc[i] -
+					       n_submit_cyc));
+	}
 
 	uint32_t rt_latency_us = k_cyc_to_us_ceil32(demo_rt_done_cyc -
 						    rt_submit_cyc);
@@ -322,6 +347,7 @@ static int cmd_demo_preempt(const struct shell *sh, size_t argc,
 
 restore:
 	/* Put the stub blob back and reopen cross-core serving */
+	k_thread_priority_set(k_current_get(), old_prio);
 	(void)syn_hal_npu_load_model(dummy_model, sizeof(dummy_model));
 	syn_remote_serve_resume();
 	return ret;

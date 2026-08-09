@@ -492,6 +492,22 @@ static const char *priority_name(syn_priority_t prio)
 #include "syn_ingest.h"
 #include <synaptic/syn_hal_dma.h>
 
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+/* eDMA bring-up diagnostics (board-only, defined in the eDMA HAL) */
+void syn_hal_dma_dump(int channel);
+
+/* Shared by `syn dma probe` and `syn dma bench`: the eDMA cannot
+ * reach the tensor arena region (its non-secure bus transactions
+ * fault on that RAM's security attributes, and with no-error-irq the
+ * failure is a silent timeout - board finding). Static buffers in
+ * the main RAM region are DMA-reachable.
+ */
+static uint8_t dma_buf_src[8192] __aligned(4);
+static uint8_t dma_buf_a[8192] __aligned(4);
+static uint8_t dma_buf_b[8192] __aligned(4);
+
+#endif
+
 struct dma_bench_ctx {
 	uint32_t bad_frames;
 	uint32_t checksum;
@@ -548,6 +564,14 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+	/* Arena RAM is not eDMA-reachable (see the board finding at the
+	 * shared buffers above): bench from DMA-reachable statics.
+	 */
+	uint8_t *src = dma_buf_src;
+	uint8_t *dst0 = dma_buf_a;
+	uint8_t *dst1 = dma_buf_b;
+#else
 	uint8_t *src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
 
 	if (src == NULL) {
@@ -572,6 +596,10 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 		return -ENOMEM;
 	}
 
+	uint8_t *dst0 = b0->data;
+	uint8_t *dst1 = b1->data;
+#endif
+
 	/* Static frame body under the per-frame stamp */
 	memset(src, 0x5A, DMA_BENCH_FRAME);
 
@@ -582,8 +610,8 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 
 	for (uint32_t seq = 0; seq < frames; seq++) {
 		dma_bench_fill(src, DMA_BENCH_FRAME, seq, NULL);
-		memcpy(b0->data, src, DMA_BENCH_FRAME);
-		dma_bench_process(b0->data, DMA_BENCH_FRAME, seq, &ctx);
+		memcpy(dst0, src, DMA_BENCH_FRAME);
+		dma_bench_process(dst0, DMA_BENCH_FRAME, seq, &ctx);
 	}
 
 	uint32_t cpu_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
@@ -594,7 +622,7 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 
 	syn_ingest_config_t icfg = {
 		.src = src,
-		.bufs = { b0->data, b1->data },
+		.bufs = { dst0, dst1 },
 		.frame_size = DMA_BENCH_FRAME,
 		.dma_channel = DMA_BENCH_CH,
 		.fill = dma_bench_fill,
@@ -607,12 +635,17 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 	syn_ingest_stats_t st;
 
 	syn_ingest_last_stats(&st);
+#ifndef CONFIG_SOC_SERIES_MCXNX4X
 	syn_mem_scratch_release(src);
 	syn_mem_reset_ephemeral();
+#endif
 
 	if (ret != 0) {
 		shell_error(sh, "ingest failed: %d (frames %u, dma errors "
 			    "%u)", ret, st.frames, st.dma_errors);
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+		syn_hal_dma_dump(DMA_BENCH_CH);
+#endif
 		return ret;
 	}
 
@@ -1290,10 +1323,100 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_dsp,
 	SHELL_SUBCMD_SET_END
 );
 
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+static K_SEM_DEFINE(probe_sem, 0, 1);
+static volatile int probe_status;
+
+static void probe_cb(int channel, int status, void *user_data)
+{
+	ARG_UNUSED(channel);
+	ARG_UNUSED(user_data);
+	probe_status = status;
+	k_sem_give(&probe_sem);
+}
+
+static int cmd_dma_probe(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	uint8_t *psrc = dma_buf_src;
+	uint8_t *pdst = dma_buf_a;
+
+	int ret = syn_hal_dma_init();
+
+	if (ret != 0 && ret != -EALREADY) {
+		shell_error(sh, "DMA unavailable: %d", ret);
+		return ret;
+	}
+
+	uint8_t *pdst2 = dma_buf_b;
+	uint8_t *dsts[2] = { pdst, pdst2 };
+
+	/* Phase 1: fixed destination, start->wait (known good).
+	 * Phase 2: the ingest pump's exact pattern at small scale -
+	 * ALTERNATING destinations and CPU work between start and wait.
+	 */
+	for (int round = 0; round < 6; round++) {
+		bool pipelined = (round >= 3);
+		uint8_t *dst = pipelined ? dsts[round & 1] : pdst;
+
+		memset(psrc, 0x10 + round, 8192);
+		memset(dst, 0, 8192);
+		k_sem_reset(&probe_sem);
+
+		syn_dma_config_t cfg = {
+			.src_periph = SYN_DMA_PERIPH_MEMORY,
+			.dst_periph = SYN_DMA_PERIPH_MEMORY,
+			.src_addr = psrc,
+			.dst_addr = dst,
+			.transfer_size = 8192,
+		};
+
+		ret = syn_hal_dma_configure(0, &cfg);
+		if (ret == 0) {
+			ret = syn_hal_dma_start(0, probe_cb, NULL);
+		}
+		shell_print(sh, "round %d%s: cfg+start=%d", round,
+			    pipelined ? " (pump-like)" : "", ret);
+		if (ret != 0) {
+			syn_hal_dma_dump(0);
+			continue;
+		}
+
+		if (pipelined) {
+			/* Stand-in for frame processing */
+			volatile uint32_t acc = 0;
+
+			for (uint32_t i = 0; i < 50000; i++) {
+				acc += i;
+			}
+		}
+
+		if (k_sem_take(&probe_sem, K_MSEC(300)) != 0) {
+			shell_error(sh, "round %d: completion TIMEOUT",
+				    round);
+			syn_hal_dma_dump(0);
+			continue;
+		}
+		shell_print(sh, "round %d: status=%d copy %s", round,
+			    probe_status,
+			    (memcmp(psrc, dst, 8192) == 0) ?
+			    "OK" : "MISMATCH");
+	}
+	syn_hal_dma_dump(0);
+	return 0;
+}
+#endif /* CONFIG_SOC_SERIES_MCXNX4X */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_dma,
 	SHELL_CMD_ARG(bench, NULL,
 		      "Zero-copy ingest vs CPU copy: syn dma bench "
 		      "[frames]", cmd_dma_bench, 1, 1),
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+	SHELL_CMD(probe, NULL, "eDMA bring-up probe: 3 transfers + regs",
+		  cmd_dma_probe),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 

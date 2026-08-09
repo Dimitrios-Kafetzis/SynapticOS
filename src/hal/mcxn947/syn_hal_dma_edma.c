@@ -32,6 +32,28 @@ LOG_MODULE_REGISTER(syn_hal_dma_edma, CONFIG_SYNAPTIC_LOG_LEVEL);
 #if defined(CONFIG_DMA) && DT_NODE_HAS_STATUS(DT_NODELABEL(edma0), okay)
 
 #include <zephyr/drivers/dma.h>
+#include <fsl_edma.h>
+
+/* BOARD FINDING (Phase 5): Zephyr 3.7's dma_mcux_edma driver never
+ * issues the eDMA v4 software START for memory-to-memory transfers -
+ * it only enables the hardware request, and with mux source 0 there
+ * is no requestor, so the transfer sits forever and the completion
+ * callback never fires. We size the minor loop to the WHOLE transfer
+ * (burst = transfer_size, so one service request moves everything)
+ * and trigger the START bit ourselves after dma_start().
+ */
+#define EDMA_BASE_PTR ((EDMA_Type *)DT_REG_ADDR(DT_NODELABEL(edma0)))
+
+/* BOARD FINDING (Phase 5): CPU0 runs in the secure world and its
+ * pointers carry the TrustZone secure alias (bit 28, e.g. SRAM at
+ * 0x30000000). The eDMA issues non-secure transactions and bus-errors
+ * on secure-alias addresses, so DMA-visible addresses must be the
+ * plain aliases: strip bit 28.
+ */
+static uint32_t dma_addr(const void *p)
+{
+	return (uint32_t)(uintptr_t)p & ~BIT(28);
+}
 
 #define SYN_DMA_CHANNELS   4
 #define EDMA_CH_BASE       8   /* first eDMA channel we own */
@@ -57,7 +79,7 @@ static struct edma_channel *get_channel(int channel)
 	return &channels[channel];
 }
 
-static void edma_callback(const struct device *dev, void *user_data,
+static void syn_edma_done_cb(const struct device *dev, void *user_data,
 			  uint32_t hw_channel, int status)
 {
 	ARG_UNUSED(dev);
@@ -74,14 +96,20 @@ static void edma_callback(const struct device *dev, void *user_data,
 	}
 
 	if (ch->active && ch->cfg.circular) {
-		/* Software re-arm for the next iteration */
+		/* Software re-arm for the next iteration (no dma_start:
+		 * see the ERQ board finding in syn_hal_dma_start)
+		 */
 		if (dma_reload(dma_dev, hw_channel,
-			       (uint32_t)(uintptr_t)ch->cfg.src_addr,
-			       (uint32_t)(uintptr_t)ch->cfg.dst_addr,
-			       ch->cfg.transfer_size) != 0 ||
-		    dma_start(dma_dev, hw_channel) != 0) {
+			       dma_addr(ch->cfg.src_addr),
+			       dma_addr(ch->cfg.dst_addr),
+			       ch->cfg.transfer_size) != 0) {
 			LOG_ERR("Circular re-arm failed on channel %d", idx);
 			ch->active = false;
+		} else {
+			EDMA_ClearChannelStatusFlags(EDMA_BASE_PTR,
+						     hw_channel,
+						     (uint32_t)kEDMA_DoneFlag);
+			EDMA_TriggerChannelStart(EDMA_BASE_PTR, hw_channel);
 		}
 	}
 }
@@ -148,19 +176,22 @@ int syn_hal_dma_start(int channel, syn_dma_cb_t callback, void *user_data)
 	}
 
 	struct dma_block_config block = {
-		.source_address = (uint32_t)(uintptr_t)ch->cfg.src_addr,
-		.dest_address = (uint32_t)(uintptr_t)ch->cfg.dst_addr,
+		.source_address = dma_addr(ch->cfg.src_addr),
+		.dest_address = dma_addr(ch->cfg.dst_addr),
 		.block_size = ch->cfg.transfer_size,
 	};
 	struct dma_config cfg = {
 		.channel_direction = MEMORY_TO_MEMORY,
 		.source_data_size = width,
 		.dest_data_size = width,
-		.source_burst_length = width,
-		.dest_burst_length = width,
+		/* Minor loop = whole transfer: one software START moves
+		 * everything (see the board finding above).
+		 */
+		.source_burst_length = ch->cfg.transfer_size,
+		.dest_burst_length = ch->cfg.transfer_size,
 		.block_count = 1,
 		.head_block = &block,
-		.dma_callback = edma_callback,
+		.dma_callback = syn_edma_done_cb,
 		.user_data = ch,
 		.complete_callback_en = 1,
 	};
@@ -173,13 +204,42 @@ int syn_hal_dma_start(int channel, syn_dma_cb_t callback, void *user_data)
 		return ret;
 	}
 
+	/* BOARD FINDING (Phase 5): do NOT call dma_start() for
+	 * memory-to-memory work. It enables the hardware request (ERQ)
+	 * with channel mux source 0, and spurious triggers then race
+	 * the software START (channel error flag, transfers dying
+	 * mid-stream). Software-paced transfers need only: configure,
+	 * clear the latched DONE flag (write-1-clear; START is ignored
+	 * while it is set), set START. The completion interrupt is
+	 * armed by the configure step.
+	 */
 	ch->active = true;
-	ret = dma_start(dma_dev, hw_ch);
-	if (ret != 0) {
-		ch->active = false;
-		LOG_ERR("dma_start failed on channel %d: %d", channel, ret);
+	EDMA_ClearChannelStatusFlags(EDMA_BASE_PTR, hw_ch,
+				     (uint32_t)kEDMA_DoneFlag);
+	EDMA_EnableChannelInterrupts(EDMA_BASE_PTR, hw_ch,
+				     (uint32_t)kEDMA_MajorInterruptEnable);
+	EDMA_TriggerChannelStart(EDMA_BASE_PTR, hw_ch);
+	return 0;
+}
+
+/* Diagnostic register dump (printk: synchronous, survives log-buffer
+ * pressure). Used by `syn dma regs` while the eDMA bring-up settles.
+ */
+void syn_hal_dma_dump(int channel)
+{
+	if (channel < 0 || channel >= SYN_DMA_CHANNELS) {
+		return;
 	}
-	return ret;
+
+	uint32_t hw_ch = (uint32_t)(EDMA_CH_BASE + channel);
+	edma_core_channel_t *chan = EDMA_CHANNEL_BASE(EDMA_BASE_PTR, hw_ch);
+	edma_core_tcd_t *tcd = EDMA_TCD_BASE(EDMA_BASE_PTR, hw_ch);
+
+	printk("eDMA ch%u: CH_CSR=%08x CH_ES=%08x CH_INT=%08x\n",
+	       (unsigned)hw_ch, chan->CH_CSR, chan->CH_ES, chan->CH_INT);
+	printk("  TCD: SADDR=%08x DADDR=%08x NBYTES=%08x CSR=%04x "
+	       "CITER=%04x BITER=%04x\n", tcd->SADDR, tcd->DADDR,
+	       tcd->NBYTES, tcd->CSR, tcd->CITER, tcd->BITER);
 }
 
 int syn_hal_dma_stop(int channel)

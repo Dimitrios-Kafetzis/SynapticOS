@@ -35,6 +35,13 @@ static void dma_cb(int channel, int status, void *user_data)
 static int kick_transfer(const syn_ingest_config_t *cfg, uint32_t seq,
 			 void *dst)
 {
+	/* Guard against a stale token from a late callback of the
+	 * previous transfer. Do NOT stop/abort the channel here: on the
+	 * eDMA an abort between back-to-back one-shot transfers leaves
+	 * the channel unable to complete the next one (board finding).
+	 */
+	k_sem_reset(&dma_done);
+
 	if (cfg->fill != NULL) {
 		cfg->fill(cfg->src, cfg->frame_size, seq, cfg->user);
 	}

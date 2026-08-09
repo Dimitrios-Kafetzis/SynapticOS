@@ -89,6 +89,14 @@ if(CONFIG_SOC_SERIES_MCXNX4X)
         src/hal/mcxn947/syn_hal_dsp_pq.c
         src/hal/mcxn947/syn_hal_dma_edma.c
     )
+    if(CONFIG_DMA)
+        # The DMA HAL software-triggers eDMA v4 mem-to-mem transfers
+        # directly (the Zephyr driver never does); it needs the SDK
+        # eDMA headers.
+        zephyr_library_include_directories(
+            ${ZEPHYR_HAL_NXP_MODULE_DIR}/mcux/mcux-sdk/drivers/edma4
+            ${ZEPHYR_HAL_NXP_MODULE_DIR}/mcux/mcux-sdk/devices/MCXN947/drivers)
+    endif()
     if(CONFIG_SYNAPTIC_POWERQUAD)
         # PowerQuad SDK driver has no Zephyr glue in this hal_nxp
         # revision; compile the needed engines directly.
