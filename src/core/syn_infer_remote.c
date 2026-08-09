@@ -218,9 +218,27 @@ int syn_remote_infer(syn_model_handle_t model,
 
 #else /* CPU0: serve side */
 
+#include "syn_drain_gate.h"
+
 static uint32_t serve_count;
 static uint32_t serve_errors;
 static uint64_t serve_total_us;
+
+/* Drainable admission for the one-at-a-time serve loop: OTA begin()
+ * pauses admission and waits out the in-flight request so CPU1 is
+ * never parked mid-serve (Phase 5.7 carry-over fix).
+ */
+static syn_drain_gate_t serve_gate;
+
+int syn_remote_serve_drain(uint32_t timeout_ms)
+{
+	return syn_drain_gate_drain(&serve_gate, timeout_ms);
+}
+
+void syn_remote_serve_resume(void)
+{
+	syn_drain_gate_resume(&serve_gate);
+}
 
 static void model_load_handler(const syn_ipc_msg_t *msg, void *ctx)
 {
@@ -263,6 +281,14 @@ static void infer_req_handler(const syn_ipc_msg_t *msg, void *ctx)
 			      : SYN_PRIORITY_NORMAL;
 
 	slot->output_len = 0;
+
+	bool admitted = syn_drain_gate_enter(&serve_gate);
+
+	if (!admitted) {
+		/* Serving is paused for an OTA session */
+		ret = -EAGAIN;
+		goto respond;
+	}
 
 	ret = syn_model_get_info(slot->model, &info);
 	if (ret != 0) {
@@ -335,6 +361,13 @@ respond:
 	if (send_with_retry(&resp) != 0) {
 		LOG_ERR("INFER_RESP send failed; CPU1 will time out");
 	}
+
+	/* A drain waits for the response send too, so CPU1 is only
+	 * parked once the exchange fully completed.
+	 */
+	if (admitted) {
+		syn_drain_gate_exit(&serve_gate);
+	}
 }
 
 int syn_remote_serve_init(void)
@@ -342,6 +375,8 @@ int syn_remote_serve_init(void)
 	if (syn_ipc_region() == NULL) {
 		return -ENODEV;
 	}
+
+	syn_drain_gate_init(&serve_gate);
 
 	int ret = syn_ipc_register_handler(SYN_IPC_MODEL_LOAD,
 					   model_load_handler, NULL);

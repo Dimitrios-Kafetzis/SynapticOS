@@ -50,6 +50,23 @@ uint32_t syn_remote_serve_errors(void);
 uint32_t syn_remote_serve_avg_us(void);
 
 /**
+ * @brief CPU0: pause serve admission and wait for the in-flight
+ *        request (if any) to finish, response included.
+ *
+ * Used by syn_ota_begin() so CPU1 is never parked mid-request. New
+ * requests are answered with -EAGAIN until
+ * syn_remote_serve_resume(). Admission stays paused even on
+ * timeout.
+ *
+ * @return 0 once idle, -ETIMEDOUT when the in-flight request
+ *         outlived @p timeout_ms.
+ */
+int syn_remote_serve_drain(uint32_t timeout_ms);
+
+/** @brief CPU0: reopen serve admission after a drain. */
+void syn_remote_serve_resume(void);
+
+/**
  * @brief CPU1: resolve a model name to a handle on CPU0.
  *
  * @return 0 on success (handle written), -ENOENT if CPU0 does not

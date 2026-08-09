@@ -21,6 +21,7 @@ zephyr_library_sources(
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC
     src/core/syn_infer.c
     src/core/syn_ipc_ring.c
+    src/core/syn_drain_gate.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_DUAL_CORE
