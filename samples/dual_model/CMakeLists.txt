@@ -5,8 +5,10 @@ project(dual_model VERSION 0.1.0)
 target_sources(app PRIVATE src/main.c)
 target_link_libraries(app PRIVATE synaptic_os)
 
-# Boot sequence and shared-layout internals are not part of the
-# frozen public API; the sample reaches into src/core deliberately.
+# Boot sequence, shared-layout and layered-execution internals are
+# not part of the frozen public API; the sample reaches into
+# src/core and src/hal/common deliberately.
 target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/hal/common
 )
