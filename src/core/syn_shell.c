@@ -10,9 +10,11 @@
 #include <zephyr/shell/shell.h>
 #include <synaptic/syn_api.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 #include "../hal/common/syn_dsp_soft.h"
+#include "syn_mem_internal.h"
 
 #ifdef CONFIG_SYNAPTIC_MPU_PROTECT
 #include "syn_mpu_internal.h"
@@ -25,7 +27,6 @@
 #endif
 
 #ifdef CONFIG_SYNAPTIC_OTA
-#include <string.h>
 #include <zephyr/sys/util.h> /* hex2bin */
 #include <synaptic/syn_model_ota.h>
 #include "syn_model_ota_internal.h"
@@ -65,6 +66,43 @@ static int cmd_mem_stats(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* syn mem dump */
+static int cmd_mem_dump(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	syn_mem_layout_t lay;
+	int ret = syn_mem_get_layout(&lay);
+
+	if (ret != 0) {
+		shell_error(sh, "Arena not initialized: %d", ret);
+		return ret;
+	}
+
+	const uint8_t *pers_end = lay.base + lay.persistent_used;
+	const uint8_t *eph_end = pers_end + lay.ephemeral_used;
+	const uint8_t *scratch_base = lay.base + lay.usable;
+
+	shell_print(sh, "Arena layout (%u bytes total):",
+		    (unsigned)lay.total);
+	shell_print(sh, "  base       %p", (const void *)lay.base);
+	shell_print(sh, "  persistent %p - %p (%u bytes)",
+		    (const void *)lay.base, (const void *)pers_end,
+		    (unsigned)lay.persistent_used);
+	shell_print(sh, "  ephemeral  %p - %p (%u bytes)",
+		    (const void *)pers_end, (const void *)eph_end,
+		    (unsigned)lay.ephemeral_used);
+	shell_print(sh, "  free       %u bytes",
+		    (unsigned)(lay.usable - lay.persistent_used -
+			       lay.ephemeral_used));
+	shell_print(sh, "  scratch    %p (%u/%u bytes used)",
+		    (const void *)scratch_base, (unsigned)lay.scratch_used,
+		    (unsigned)lay.scratch_total);
+	shell_print(sh, "First 64 bytes at arena base:");
+	shell_hexdump(sh, lay.base, 64);
+	return 0;
+}
+
 /* syn model list */
 static int cmd_model_list(const struct shell *sh, size_t argc, char **argv)
 {
@@ -89,6 +127,125 @@ static int cmd_model_list(const struct shell *sh, size_t argc, char **argv)
 			    handles[i], info.name, info.version,
 			    syn_model_is_loaded(handles[i]) ? "(loaded)" : "");
 	}
+	return 0;
+}
+
+static const char *dtype_name(syn_npu_dtype_t dtype)
+{
+	switch (dtype) {
+	case SYN_NPU_DTYPE_INT8:
+		return "int8";
+	case SYN_NPU_DTYPE_UINT8:
+		return "uint8";
+	case SYN_NPU_DTYPE_INT16:
+		return "int16";
+	case SYN_NPU_DTYPE_FLOAT16:
+		return "float16";
+	case SYN_NPU_DTYPE_FLOAT32:
+		return "float32";
+	default:
+		return "unknown";
+	}
+}
+
+/* syn model info <name> */
+static int cmd_model_info(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	syn_model_handle_t handle;
+	int ret = syn_model_get_by_name(argv[1], &handle);
+
+	if (ret != 0) {
+		shell_error(sh, "Model '%s' not found", argv[1]);
+		return ret;
+	}
+
+	syn_model_info_t info;
+
+	ret = syn_model_get_info(handle, &info);
+	if (ret != 0) {
+		shell_error(sh, "get_info failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "Model '%s' (handle %u):", info.name, handle);
+	shell_print(sh, "  version:  %s", info.version);
+	shell_print(sh, "  loaded:   %s",
+		    syn_model_is_loaded(handle) ? "yes" : "no");
+	shell_print(sh, "  input:    %u bytes %s [%u,%u,%u,%u]",
+		    info.input_size, dtype_name(info.input_dtype),
+		    info.input_shape[0], info.input_shape[1],
+		    info.input_shape[2], info.input_shape[3]);
+	shell_print(sh, "  output:   %u bytes %s [%u,%u,%u,%u]",
+		    info.output_size, dtype_name(info.output_dtype),
+		    info.output_shape[0], info.output_shape[1],
+		    info.output_shape[2], info.output_shape[3]);
+	shell_print(sh, "  sram:     %u bytes required", info.sram_required);
+	if (info.flash_size != 0U) {
+		shell_print(sh, "  flash:    %u bytes at 0x%08x crc 0x%08x",
+			    info.flash_size, info.flash_offset, info.crc32);
+	} else {
+		shell_print(sh, "  flash:    (RAM-resident model)");
+	}
+	return 0;
+}
+
+/* syn model load <name> */
+static int cmd_model_load(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	syn_model_handle_t handle;
+	int ret = syn_model_get_by_name(argv[1], &handle);
+
+	if (ret != 0) {
+		shell_error(sh, "Model '%s' not found", argv[1]);
+		return ret;
+	}
+
+	uint32_t start = k_cycle_get_32();
+
+	ret = syn_model_load(handle);
+
+	uint32_t elapsed_us = k_cyc_to_us_ceil32(k_cycle_get_32() - start);
+
+	if (ret == -EALREADY) {
+		shell_print(sh, "Model '%s' is already loaded", argv[1]);
+		return 0;
+	}
+	if (ret != 0) {
+		shell_error(sh, "load failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "Model '%s' loaded to NPU (%u us)", argv[1],
+		    elapsed_us);
+	return 0;
+}
+
+/* syn model unload <name> */
+static int cmd_model_unload(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	syn_model_handle_t handle;
+	int ret = syn_model_get_by_name(argv[1], &handle);
+
+	if (ret != 0) {
+		shell_error(sh, "Model '%s' not found", argv[1]);
+		return ret;
+	}
+
+	ret = syn_model_unload(handle);
+	if (ret == -EALREADY) {
+		shell_print(sh, "Model '%s' is not loaded", argv[1]);
+		return 0;
+	}
+	if (ret != 0) {
+		shell_error(sh, "unload failed: %d", ret);
+		return ret;
+	}
+	shell_print(sh, "Model '%s' unloaded", argv[1]);
 	return 0;
 }
 
@@ -288,11 +445,48 @@ static int cmd_dsp_bench(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-/* syn infer run <model-name> */
+static int parse_priority(const char *arg, syn_priority_t *prio)
+{
+	if (strcmp(arg, "rt") == 0 || strcmp(arg, "realtime") == 0 ||
+	    strcmp(arg, "2") == 0) {
+		*prio = SYN_PRIORITY_REALTIME;
+	} else if (strcmp(arg, "normal") == 0 || strcmp(arg, "1") == 0) {
+		*prio = SYN_PRIORITY_NORMAL;
+	} else if (strcmp(arg, "be") == 0 || strcmp(arg, "best_effort") == 0 ||
+		   strcmp(arg, "0") == 0) {
+		*prio = SYN_PRIORITY_BEST_EFFORT;
+	} else {
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static const char *priority_name(syn_priority_t prio)
+{
+	switch (prio) {
+	case SYN_PRIORITY_REALTIME:
+		return "realtime";
+	case SYN_PRIORITY_NORMAL:
+		return "normal";
+	default:
+		return "best_effort";
+	}
+}
+
+/* syn infer run <model-name> [priority] */
 static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 2) {
-		shell_error(sh, "Usage: syn infer run <model-name>");
+		shell_error(sh, "Usage: syn infer run <model-name> "
+				"[be|normal|rt]");
+		return -EINVAL;
+	}
+
+	syn_priority_t prio = SYN_PRIORITY_NORMAL;
+
+	if (argc >= 3 && parse_priority(argv[2], &prio) != 0) {
+		shell_error(sh, "Bad priority '%s' (use be, normal or rt)",
+			    argv[2]);
 		return -EINVAL;
 	}
 
@@ -329,8 +523,7 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 	syn_tensor_t output = {0};
 	uint32_t start = k_cycle_get_32();
 
-	ret = syn_infer_run_sync(handle, input, &output,
-				 SYN_PRIORITY_NORMAL);
+	ret = syn_infer_run_sync(handle, input, &output, prio);
 
 	uint32_t elapsed_us = k_cyc_to_us_ceil32(k_cycle_get_32() - start);
 
@@ -344,12 +537,13 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 
 	if (output.dtype == SYN_NPU_DTYPE_INT8 && output.size > 0) {
 		syn_hal_dsp_argmax(output.data, output.size, &top_class);
-		shell_print(sh, "Model '%s': class %u (confidence %d), %u us",
-			    argv[1], top_class,
+		shell_print(sh, "Model '%s' (%s): class %u (confidence %d), "
+			    "%u us", argv[1], priority_name(prio), top_class,
 			    ((int8_t *)output.data)[top_class], elapsed_us);
 	} else {
-		shell_print(sh, "Model '%s': %u output bytes, %u us",
-			    argv[1], (unsigned)output.size, elapsed_us);
+		shell_print(sh, "Model '%s' (%s): %u output bytes, %u us",
+			    argv[1], priority_name(prio),
+			    (unsigned)output.size, elapsed_us);
 	}
 	shell_print(sh, "Use 'syn prof last' for the stage breakdown.");
 
@@ -386,6 +580,44 @@ static int cmd_ipc_status(const struct shell *sh, size_t argc, char **argv)
 				"last %u us, min %u us, max %u us",
 			    shm->ctrl.rtt_count, shm->ctrl.rtt_last_us,
 			    shm->ctrl.rtt_min_us, shm->ctrl.rtt_max_us);
+	}
+	return 0;
+}
+
+/* syn ipc stats: per-direction ring message counters. The head/tail
+ * indices are free-running, so head == total pushed, tail == total
+ * popped since ring reset.
+ */
+static int cmd_ipc_stats(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	syn_shm_region_t *shm = syn_ipc_region();
+
+	if (shm == NULL || shm->ctrl.magic != SYN_SHM_MAGIC) {
+		shell_error(sh, "IPC region not initialized");
+		return -ENODEV;
+	}
+
+	static const struct {
+		const char *name;
+		size_t offset;
+	} rings[] = {
+		{ "cpu0 to cpu1", offsetof(syn_shm_region_t, ring_c0_to_c1) },
+		{ "cpu1 to cpu0", offsetof(syn_shm_region_t, ring_c1_to_c0) },
+	};
+
+	shell_print(sh, "Ring capacity: %u messages each direction",
+		    SYN_IPC_RING_ENTRIES);
+	for (size_t i = 0; i < ARRAY_SIZE(rings); i++) {
+		const syn_ipc_ring_t *r = (const syn_ipc_ring_t *)
+			((const uint8_t *)shm + rings[i].offset);
+		uint32_t head = r->head;
+		uint32_t tail = r->tail;
+
+		shell_print(sh, "%s: pushed %u, popped %u, queued %u",
+			    rings[i].name, head, tail, head - tail);
 	}
 	return 0;
 }
@@ -577,14 +809,74 @@ static int cmd_ota_rollback(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_SYNAPTIC_OTA */
 
+/* Dynamic tab completion with the registered model names. The shell
+ * requires completion candidates in alphabetical order and a stable
+ * string for the returned syntax pointer, hence the sorted static
+ * snapshot rebuilt on every query.
+ */
+static void model_name_get(size_t idx, struct shell_static_entry *entry)
+{
+	static char names[CONFIG_SYNAPTIC_MAX_MODELS][32];
+	syn_model_handle_t handles[CONFIG_SYNAPTIC_MAX_MODELS];
+	uint8_t count = 0;
+
+	entry->handler = NULL;
+	entry->help = NULL;
+	entry->subcmd = NULL;
+	entry->syntax = NULL;
+
+	if (syn_model_list(handles, &count, CONFIG_SYNAPTIC_MAX_MODELS) != 0 ||
+	    idx >= count) {
+		return;
+	}
+
+	for (uint8_t i = 0; i < count; i++) {
+		syn_model_info_t info;
+
+		names[i][0] = '\0';
+		if (syn_model_get_info(handles[i], &info) == 0) {
+			strncpy(names[i], info.name, sizeof(names[i]) - 1);
+			names[i][sizeof(names[i]) - 1] = '\0';
+		}
+	}
+
+	for (uint8_t i = 1; i < count; i++) {
+		char tmp[32];
+
+		strcpy(tmp, names[i]);
+		int j = (int)i - 1;
+
+		while (j >= 0 && strcmp(names[j], tmp) > 0) {
+			strcpy(names[j + 1], names[j]);
+			j--;
+		}
+		strcpy(names[j + 1], tmp);
+	}
+
+	entry->syntax = names[idx];
+}
+
+SHELL_DYNAMIC_CMD_CREATE(dsub_model_name, model_name_get);
+
 /* Subcommand trees */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_mem,
 	SHELL_CMD(stats, NULL, "Show memory statistics", cmd_mem_stats),
+	SHELL_CMD(dump, NULL, "Dump arena layout and header bytes",
+		  cmd_mem_dump),
 	SHELL_SUBCMD_SET_END
 );
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_model,
 	SHELL_CMD(list, NULL, "List registered models", cmd_model_list),
+	SHELL_CMD_ARG(info, &dsub_model_name,
+		      "Show model metadata: syn model info <name>",
+		      cmd_model_info, 2, 0),
+	SHELL_CMD_ARG(load, &dsub_model_name,
+		      "Load model to NPU: syn model load <name>",
+		      cmd_model_load, 2, 0),
+	SHELL_CMD_ARG(unload, &dsub_model_name,
+		      "Unload model from NPU: syn model unload <name>",
+		      cmd_model_unload, 2, 0),
 	SHELL_SUBCMD_SET_END
 );
 
@@ -608,8 +900,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_dsp,
 );
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_infer,
-	SHELL_CMD_ARG(run, NULL, "Run inference: syn infer run <model-name>",
-		      cmd_infer_run, 2, 0),
+	SHELL_CMD_ARG(run, &dsub_model_name,
+		      "Run inference: syn infer run <model-name> "
+		      "[be|normal|rt]",
+		      cmd_infer_run, 2, 1),
 	SHELL_SUBCMD_SET_END
 );
 
@@ -625,6 +919,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_mpu,
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_ipc,
 	SHELL_CMD(status, NULL, "Show CPU1 link status", cmd_ipc_status),
+	SHELL_CMD(stats, NULL, "Show IPC ring message counters",
+		  cmd_ipc_stats),
 	SHELL_SUBCMD_SET_END
 );
 #endif
