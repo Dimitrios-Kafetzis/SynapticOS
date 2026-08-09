@@ -10,12 +10,19 @@ Drives the device's shell OTA transport:
   syn ota done                (device validates CRC32 and stages)
   syn ota activate            (unless --no-activate)
 
+With --binary the payload rides the raw transport instead of hex
+lines: per block the host sends `syn ota rawdata <n>`, waits for the
+device's "RAW <n>" line, streams <n> raw bytes, and waits for
+"raw ok". No hex doubling and no echo, so throughput approaches the
+UART line rate (~2x the hex transport at 115200).
+
 The transfer is flow-controlled by the device's per-line responses,
 so no hardware handshaking is needed. Model name defaults to the one
 embedded in the .synm header.
 
 Usage:
   python3 syn_ota_send.py --port /dev/ttyACM0 demo.synm
+  python3 syn_ota_send.py --port /dev/ttyACM0 --binary demo.synm
   python3 syn_ota_send.py --port /dev/ttyACM0 --no-activate demo.synm
 
 Linux only (termios), Python 3.10+, stdlib only.
@@ -100,6 +107,10 @@ def main():
     ap.add_argument("--chunk", type=int, default=1024,
                     help="payload bytes per shell line (default 1024; the "
                          "device's SHELL_CMD_BUFF_SIZE bounds this)")
+    ap.add_argument("--binary", action="store_true",
+                    help="use the raw binary transport (syn ota rawdata)")
+    ap.add_argument("--block", type=int, default=16384,
+                    help="raw bytes per rawdata block (default 16384)")
     ap.add_argument("--no-activate", action="store_true",
                     help="stage only; activate later on the device shell")
     ap.add_argument("-v", "--verbose", action="store_true",
@@ -126,8 +137,12 @@ def main():
     termios.tcflush(fd, termios.TCIFLUSH)
     sh.pending = b""
 
-    print(f"sending '{name}' ({len(image)} bytes) to {args.port} "
-          f"in {args.chunk}-byte chunks")
+    if args.binary:
+        print(f"sending '{name}' ({len(image)} bytes) to {args.port} "
+              f"raw, {args.block}-byte blocks")
+    else:
+        print(f"sending '{name}' ({len(image)} bytes) to {args.port} "
+              f"in {args.chunk}-byte chunks")
 
     t0 = time.monotonic()
     # begin erases the whole staging area sector by sector; scale the
@@ -138,9 +153,33 @@ def main():
 
     sent = 0
     while sent < len(image):
-        chunk = image[sent:sent + args.chunk]
-        sh.command(f"syn ota data {chunk.hex()}", "ok ", timeout=10.0)
-        sent += len(chunk)
+        if args.binary:
+            block = image[sent:sent + args.block]
+            sh.command(f"syn ota rawdata {len(block)}", "RAW ",
+                       timeout=10.0)
+            off = 0
+            while off < len(block):
+                # the tty driver may take fewer bytes than offered
+                _, w, _ = select.select([], [sh.fd], [], 5.0)
+                if not w:
+                    raise SystemExit("error: serial TX stalled")
+                off += os.write(sh.fd, block[off:off + 2048])
+            # wait for the device's completion line
+            deadline = time.monotonic() + 10.0
+            while True:
+                line = sh.read_line(max(0.05,
+                                        deadline - time.monotonic()))
+                if line is None:
+                    raise SystemExit("error: timeout waiting for raw ok")
+                if "raw ok" in line:
+                    break
+                if "failed" in line or "error" in line:
+                    raise SystemExit(f"error: device reported: {line}")
+            sent += len(block)
+        else:
+            chunk = image[sent:sent + args.chunk]
+            sh.command(f"syn ota data {chunk.hex()}", "ok ", timeout=10.0)
+            sent += len(chunk)
         pct = 100 * sent // len(image)
         print(f"\r  {sent}/{len(image)} bytes ({pct}%)", end="", flush=True)
     print()

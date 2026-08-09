@@ -1027,6 +1027,119 @@ static int cmd_ota_data(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* syn ota rawdata <bytes>: binary transport (Phase 5.6). Switches
+ * the shell into bypass mode and feeds the next <bytes> raw UART
+ * bytes straight into the OTA engine - no hex doubling, no echo, no
+ * line parsing. The host waits for the "RAW <n>" line, streams the
+ * bytes, then waits for "raw ok". A stalled transfer is abandoned
+ * by a watchdog work item so the shell always comes back.
+ */
+#define OTA_RAW_TIMEOUT_MS 5000
+
+static struct {
+	const struct shell *sh;
+	size_t expected;
+	size_t received;
+	int error;
+	uint8_t buf[512];
+	size_t buffered;
+} raw;
+
+static void ota_raw_timeout(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(raw_watchdog, ota_raw_timeout);
+
+static void ota_raw_finish(const struct shell *sh)
+{
+	(void)k_work_cancel_delayable(&raw_watchdog);
+	shell_set_bypass(sh, NULL);
+
+	if (raw.error != 0) {
+		shell_error(sh, "raw transfer failed: %d after %u bytes",
+			    raw.error, (unsigned)raw.received);
+		return;
+	}
+
+	syn_ota_status_t st;
+
+	syn_ota_get_status(&st);
+	shell_print(sh, "raw ok %u/%u", st.received, st.total_size);
+}
+
+static void ota_raw_timeout(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (raw.sh != NULL && raw.received < raw.expected) {
+		raw.error = -ETIMEDOUT;
+		ota_raw_finish(raw.sh);
+	}
+}
+
+static void ota_raw_flush(void)
+{
+	if (raw.buffered == 0U || raw.error != 0) {
+		raw.buffered = 0;
+		return;
+	}
+
+	int ret = syn_ota_write_chunk(raw.buf, raw.buffered);
+
+	if (ret != 0) {
+		/* Keep consuming the announced bytes so the stream tail
+		 * is never parsed as shell input; report at the end.
+		 */
+		raw.error = ret;
+	}
+	raw.buffered = 0;
+}
+
+static void ota_raw_bypass(const struct shell *sh, uint8_t *data, size_t len)
+{
+	while (len > 0U && raw.received < raw.expected) {
+		size_t take = MIN(len, sizeof(raw.buf) - raw.buffered);
+
+		take = MIN(take, raw.expected - raw.received);
+		memcpy(raw.buf + raw.buffered, data, take);
+		raw.buffered += take;
+		raw.received += take;
+		data += take;
+		len -= take;
+
+		if (raw.buffered == sizeof(raw.buf)) {
+			ota_raw_flush();
+		}
+	}
+
+	if (raw.received >= raw.expected) {
+		ota_raw_flush();
+		ota_raw_finish(sh);
+	} else {
+		(void)k_work_reschedule(&raw_watchdog,
+					K_MSEC(OTA_RAW_TIMEOUT_MS));
+	}
+}
+
+static int cmd_ota_rawdata(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	size_t n = (size_t)strtoul(argv[1], NULL, 0);
+
+	if (n == 0U) {
+		shell_error(sh, "Usage: syn ota rawdata <bytes>");
+		return -EINVAL;
+	}
+
+	memset(&raw, 0, sizeof(raw));
+	raw.sh = sh;
+	raw.expected = n;
+
+	shell_print(sh, "RAW %u", (unsigned)n);
+	shell_set_bypass(sh, ota_raw_bypass);
+	(void)k_work_reschedule(&raw_watchdog, K_MSEC(OTA_RAW_TIMEOUT_MS));
+	return 0;
+}
+
 /* syn ota done */
 static int cmd_ota_done(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1223,6 +1336,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ota,
 		      cmd_ota_begin, 3, 0),
 	SHELL_CMD_ARG(data, NULL, "Feed a hex-encoded chunk",
 		      cmd_ota_data, 2, 0),
+	SHELL_CMD_ARG(rawdata, NULL,
+		      "Receive raw binary bytes: syn ota rawdata <bytes>",
+		      cmd_ota_rawdata, 2, 0),
 	SHELL_CMD(done, NULL, "Finish transfer: validate + stage",
 		  cmd_ota_done),
 	SHELL_CMD(activate, NULL, "Activate the staged model",
