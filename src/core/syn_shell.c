@@ -15,6 +15,7 @@
 
 #include "../hal/common/syn_dsp_soft.h"
 #include "syn_mem_internal.h"
+#include "syn_infer_internal.h"
 
 #ifdef CONFIG_SYNAPTIC_MPU_PROTECT
 #include "syn_mpu_internal.h"
@@ -552,6 +553,27 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* syn infer stats */
+static int cmd_infer_stats(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	syn_infer_stats_t st;
+
+	syn_infer_get_stats(&st);
+	shell_print(sh, "Jobs: %u completed, %u errors, %u cancelled",
+		    st.completed, st.errors, st.cancelled);
+	shell_print(sh, "Deadline misses: %u", st.deadline_misses);
+	shell_print(sh, "Preemptions: %u (resumes %u)",
+		    st.preemptions, st.resumes);
+	if (st.preemptions > 0U) {
+		shell_print(sh, "Context save: last %u us, max %u us",
+			    st.last_save_us, st.max_save_us);
+	}
+	return 0;
+}
+
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
 /* syn ipc status */
 static int cmd_ipc_status(const struct shell *sh, size_t argc, char **argv)
@@ -904,6 +926,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_infer,
 		      "Run inference: syn infer run <model-name> "
 		      "[be|normal|rt]",
 		      cmd_infer_run, 2, 1),
+	SHELL_CMD(stats, NULL, "Show scheduler counters", cmd_infer_stats),
 	SHELL_SUBCMD_SET_END
 );
 

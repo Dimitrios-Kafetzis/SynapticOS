@@ -9,13 +9,24 @@
  *   enforced at add-time; build() validates and computes a worst-case
  *   memory estimate.
  *
- * Job scheduler (Phase 2.2):
+ * Job scheduler (Phase 2.2, extended in 5.1):
  *   Fixed job table of CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS entries. A
- *   dedicated scheduler thread dequeues jobs in priority order (FIFO
- *   within the same priority), executes the pipeline stages sequentially,
- *   and signals completion through a per-job semaphore. The deadline_us
- *   and preemptible parameters are recorded but not acted on yet;
- *   deadline-aware dispatch and layer-granular preemption are Phase 3.
+ *   dedicated scheduler thread dequeues jobs in priority order,
+ *   earliest-deadline-first within the same priority (FIFO on ties),
+ *   executes the pipeline stages sequentially, and signals completion
+ *   through a per-job semaphore. Completions later than deadline_us
+ *   after submission count as deadline misses.
+ *
+ * Layer-boundary preemption (Phase 5.1, layered models only):
+ *   When the running job is preemptible and executes a layered model
+ *   (see syn_npu_layered.h), the scheduler checks for queued
+ *   higher-priority jobs between layers. On preemption the layered
+ *   context is parked in a suspension slot, the job moves to
+ *   JOB_SUSPENDED, and it resumes bit-exactly from the saved context
+ *   once it is the best runnable job again. Suspended jobs keep
+ *   their pipeline input and model pointer valid; unloading or
+ *   overwriting that model while suspended is undefined (the quiesce
+ *   gate only drains the RUNNING job).
  *
  * Stage buffer convention:
  *   Each stage output is an ephemeral arena tensor. Its capacity is
@@ -40,6 +51,10 @@ LOG_MODULE_REGISTER(syn_infer, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #include "syn_prof_internal.h"
 #include "syn_infer_internal.h"
+
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+#include "../hal/common/syn_npu_layered.h"
+#endif
 
 #define SYN_MAX_PIPELINES      4
 #define STAGE_MIN_CAPACITY     64
@@ -75,6 +90,7 @@ enum job_state {
 	JOB_FREE = 0,
 	JOB_QUEUED,
 	JOB_RUNNING,
+	JOB_SUSPENDED,
 	JOB_DONE,
 	JOB_ERROR,
 	JOB_CANCELLED,
@@ -89,6 +105,13 @@ struct infer_job {
 	syn_tensor_t output;
 	int result;
 	uint32_t seq;
+	int64_t deadline_at_us;  /* Absolute deadline, INT64_MAX = none */
+	uint32_t start_cyc;      /* Submission time for deadline check  */
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	int8_t ctx_slot;         /* Suspension slot, -1 = none          */
+	uint8_t resume_stage;    /* Pipeline stage to resume at         */
+	bool resuming;
+#endif
 	struct k_sem done;
 };
 
@@ -107,6 +130,26 @@ static bool dispatch_paused;
 static bool job_running;
 static uint32_t deferred_wakes;
 static K_SEM_DEFINE(drain_sem, 0, 1);
+
+/* Scheduler counters (5.1); guarded by infer_lock. */
+static syn_infer_stats_t stats;
+
+void syn_infer_get_stats(syn_infer_stats_t *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	k_mutex_lock(&infer_lock, K_FOREVER);
+	*out = stats;
+	k_mutex_unlock(&infer_lock);
+}
+
+void syn_infer_reset_stats(void)
+{
+	k_mutex_lock(&infer_lock, K_FOREVER);
+	memset(&stats, 0, sizeof(stats));
+	k_mutex_unlock(&infer_lock);
+}
 
 /* ------------------------------------------------------------------ */
 /* Pipeline construction (2.1)                                        */
@@ -301,9 +344,19 @@ void syn_pipeline_destroy(syn_pipeline_t *pipe)
 
 	/* Cancel jobs still referencing this pipeline */
 	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
-		if (jobs[i].state == JOB_QUEUED && jobs[i].pipe == pipe) {
+		bool waiting = (jobs[i].state == JOB_QUEUED);
+
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+		if (jobs[i].state == JOB_SUSPENDED) {
+			syn_npu_layered_slot_free(jobs[i].ctx_slot);
+			jobs[i].ctx_slot = -1;
+			waiting = true;
+		}
+#endif
+		if (waiting && jobs[i].pipe == pipe) {
 			jobs[i].state = JOB_CANCELLED;
 			jobs[i].result = -ECANCELED;
+			stats.cancelled++;
 			k_sem_give(&jobs[i].done);
 			LOG_WRN("Job %u cancelled: pipeline '%s' destroyed",
 				jobs[i].id, pipe->name);
@@ -388,10 +441,128 @@ static syn_tensor_t *alloc_stage_output(size_t capacity)
 				    SYN_MEM_EPHEMERAL);
 }
 
-static int execute_model_stage(const syn_model_info_t *info,
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+/** True when a queued job outranks the running one (dispatch order). */
+static bool preempt_pending(const struct infer_job *cur)
+{
+	bool found = false;
+
+	k_mutex_lock(&infer_lock, K_FOREVER);
+	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
+		if (jobs[i].state == JOB_QUEUED &&
+		    jobs[i].params.priority > cur->params.priority) {
+			found = true;
+			break;
+		}
+	}
+	k_mutex_unlock(&infer_lock);
+	return found;
+}
+
+/**
+ * Layer-by-layer execution with preemption checks at layer
+ * boundaries. Returns 1 when the model completed (output produced),
+ * 0 when the resident model is not layered (caller falls back to the
+ * monolithic path), -EINTR when the job was preempted and its
+ * context parked, other negatives on error.
+ */
+static int execute_layered(struct infer_job *job,
+			   const syn_model_info_t *info,
+			   const syn_tensor_t *in, syn_tensor_t **out)
+{
+	int rem;
+
+	if (job->resuming) {
+		job->resuming = false;
+		rem = syn_npu_layered_restore(job->ctx_slot);
+		if (rem != 0) {
+			return rem;
+		}
+		job->ctx_slot = -1;
+		rem = syn_npu_layered_remaining();
+	} else {
+		rem = syn_npu_layered_begin(in->data, in->size);
+		if (rem <= 0) {
+			return rem; /* 0: not layered; <0: bad input */
+		}
+	}
+
+	while (rem > 0) {
+		rem = syn_npu_layered_step();
+		if (rem < 0) {
+			return rem;
+		}
+		if (rem > 0 && job->params.preemptible &&
+		    preempt_pending(job)) {
+			uint32_t t0 = k_cycle_get_32();
+			int slot = syn_npu_layered_save();
+
+			if (slot < 0) {
+				/* No free slot: keep running */
+				LOG_WRN("Job %u: no suspension slot, "
+					"finishing uninterrupted", job->id);
+				continue;
+			}
+
+			uint32_t save_us =
+				k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+
+			k_mutex_lock(&infer_lock, K_FOREVER);
+			job->ctx_slot = (int8_t)slot;
+			stats.last_save_us = save_us;
+			if (save_us > stats.max_save_us) {
+				stats.max_save_us = save_us;
+			}
+			k_mutex_unlock(&infer_lock);
+			return -EINTR;
+		}
+	}
+
+	size_t cap = info->output_size;
+
+	if (cap < STAGE_MIN_CAPACITY) {
+		cap = STAGE_MIN_CAPACITY;
+	}
+
+	syn_tensor_t *t = alloc_stage_output(cap);
+
+	if (t == NULL) {
+		return -ENOMEM;
+	}
+
+	size_t out_size = t->size;
+	int ret = syn_npu_layered_output(t->data, &out_size);
+
+	if (ret != 0) {
+		return ret;
+	}
+
+	t->size = out_size;
+	t->dtype = info->output_dtype;
+	t->ndim = 1;
+	t->shape[0] = (uint32_t)out_size;
+	*out = t;
+	return 1;
+}
+#endif /* CONFIG_SYNAPTIC_LAYER_EXEC */
+
+static int execute_model_stage(struct infer_job *job,
+			       const syn_model_info_t *info,
 			       const syn_tensor_t *in, syn_tensor_t **out)
 {
-	int ret = syn_hal_npu_set_input(0, in->data, in->size);
+	int ret;
+
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	ret = execute_layered(job, info, in, out);
+	if (ret != 0) {
+		return (ret == 1) ? 0 : ret;
+	}
+	/* Not a layered model: monolithic HAL invoke below */
+#else
+	ARG_UNUSED(job);
+#endif
+
+	ret = syn_hal_npu_set_input(0, in->data, in->size);
 
 	if (ret != 0) {
 		LOG_ERR("NPU set_input failed: %d", ret);
@@ -444,10 +615,22 @@ static int execute_pipeline(struct infer_job *job)
 
 	const syn_tensor_t *cur = job->input;
 	bool npu_marked = false;
+	uint8_t first_stage = 0;
+
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	if (job->resuming) {
+		/* Continue inside the model stage; earlier stages already
+		 * ran and their results live in the saved layer context.
+		 * Profiling restarts here, so the stage breakdown of a
+		 * preempted job covers only its final leg.
+		 */
+		first_stage = job->resume_stage;
+	}
+#endif
 
 	syn_prof_mark_start();
 
-	for (uint8_t i = 0; i < pipe->num_stages; i++) {
+	for (uint8_t i = first_stage; i < pipe->num_stages; i++) {
 		struct pipeline_stage *s = &pipe->stages[i];
 		syn_tensor_t *out = NULL;
 
@@ -479,7 +662,13 @@ static int execute_pipeline(struct infer_job *job)
 		}
 		case STAGE_MODEL:
 			syn_prof_mark_preprocess_done();
-			ret = execute_model_stage(&info, cur, &out);
+			ret = execute_model_stage(job, &info, cur, &out);
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+			if (ret == -EINTR) {
+				job->resume_stage = i;
+				return -EINTR;
+			}
+#endif
 			syn_prof_mark_npu_done();
 			npu_marked = true;
 			break;
@@ -534,7 +723,22 @@ static struct infer_job *find_job(syn_job_id_t id)
 	return NULL;
 }
 
-/** Pick the queued job with the highest priority (FIFO on ties). */
+/**
+ * Dispatch order: priority first, earliest absolute deadline within
+ * a priority (jobs without a deadline sort last), FIFO on ties.
+ */
+static bool job_before(const struct infer_job *a, const struct infer_job *b)
+{
+	if (a->params.priority != b->params.priority) {
+		return a->params.priority > b->params.priority;
+	}
+	if (a->deadline_at_us != b->deadline_at_us) {
+		return a->deadline_at_us < b->deadline_at_us;
+	}
+	return a->seq < b->seq;
+}
+
+/** Pick the best runnable job: queued or suspended. */
 static struct infer_job *pick_next_job(void)
 {
 	struct infer_job *best = NULL;
@@ -542,13 +746,10 @@ static struct infer_job *pick_next_job(void)
 	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
 		struct infer_job *j = &jobs[i];
 
-		if (j->state != JOB_QUEUED) {
+		if (j->state != JOB_QUEUED && j->state != JOB_SUSPENDED) {
 			continue;
 		}
-		if (best == NULL ||
-		    j->params.priority > best->params.priority ||
-		    (j->params.priority == best->params.priority &&
-		     j->seq < best->seq)) {
+		if (best == NULL || job_before(j, best)) {
 			best = j;
 		}
 	}
@@ -582,6 +783,12 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 			k_mutex_unlock(&infer_lock);
 			continue;
 		}
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+		if (job->state == JOB_SUSPENDED) {
+			job->resuming = true;
+			stats.resumes++;
+		}
+#endif
 		job->state = JOB_RUNNING;
 		job_running = true;
 		k_mutex_unlock(&infer_lock);
@@ -591,6 +798,29 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 
 		int ret = execute_pipeline(job);
 
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+		if (ret == -EINTR) {
+			k_mutex_lock(&infer_lock, K_FOREVER);
+			job->state = JOB_SUSPENDED;
+			job_running = false;
+			stats.preemptions++;
+
+			bool drain = dispatch_paused;
+
+			k_mutex_unlock(&infer_lock);
+
+			LOG_DBG("Job %u suspended at a layer boundary",
+				job->id);
+			if (drain) {
+				/* quiesce() only waits for the RUNNING job */
+				k_sem_give(&drain_sem);
+			}
+			/* One extra wakeup pays for the eventual resume */
+			k_sem_give(&sched_wake);
+			continue;
+		}
+#endif
+
 		/* Snapshot completion data under the lock: as soon as the
 		 * done semaphore is given, the waiter may consume the result
 		 * and the slot can be reused by a new submission.
@@ -599,6 +829,23 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 		job->result = ret;
 		job->state = (ret == 0) ? JOB_DONE : JOB_ERROR;
 		job_running = false;
+
+		if (ret == 0) {
+			stats.completed++;
+		} else {
+			stats.errors++;
+		}
+		if (job->params.deadline_us != 0U) {
+			uint32_t elapsed_us = k_cyc_to_us_ceil32(
+				k_cycle_get_32() - job->start_cyc);
+
+			if (elapsed_us > job->params.deadline_us) {
+				stats.deadline_misses++;
+				LOG_WRN("Job %u missed deadline: %u > %u us",
+					job->id, elapsed_us,
+					job->params.deadline_us);
+			}
+		}
 
 		syn_infer_cb_t cb = job->params.callback;
 		void *user_data = job->params.user_data;
@@ -673,7 +920,8 @@ syn_job_id_t syn_infer_submit(syn_pipeline_t *pipe,
 
 	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
 		if (jobs[i].state == JOB_QUEUED ||
-		    jobs[i].state == JOB_RUNNING) {
+		    jobs[i].state == JOB_RUNNING ||
+		    jobs[i].state == JOB_SUSPENDED) {
 			active++;
 		}
 	}
@@ -712,6 +960,15 @@ syn_job_id_t syn_infer_submit(syn_pipeline_t *pipe,
 	memset(&job->output, 0, sizeof(job->output));
 	job->result = -EINPROGRESS;
 	job->seq = next_seq++;
+	job->start_cyc = k_cycle_get_32();
+	job->deadline_at_us = (job->params.deadline_us != 0U) ?
+		(k_ticks_to_us_floor64(k_uptime_ticks()) +
+		 job->params.deadline_us) : INT64_MAX;
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	job->ctx_slot = -1;
+	job->resume_stage = 0;
+	job->resuming = false;
+#endif
 	k_sem_reset(&job->done);
 	job->state = JOB_QUEUED;
 
@@ -781,10 +1038,23 @@ int syn_infer_cancel(syn_job_id_t job_id)
 	case JOB_QUEUED:
 		job->state = JOB_CANCELLED;
 		job->result = -ECANCELED;
+		stats.cancelled++;
 		k_sem_give(&job->done);
 		ret = 0;
 		LOG_INF("Job %u cancelled", job_id);
 		break;
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	case JOB_SUSPENDED:
+		syn_npu_layered_slot_free(job->ctx_slot);
+		job->ctx_slot = -1;
+		job->state = JOB_CANCELLED;
+		job->result = -ECANCELED;
+		stats.cancelled++;
+		k_sem_give(&job->done);
+		ret = 0;
+		LOG_INF("Suspended job %u cancelled", job_id);
+		break;
+#endif
 	case JOB_RUNNING:
 		ret = -EBUSY;
 		break;

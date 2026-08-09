@@ -9,6 +9,7 @@ target_sources(app PRIVATE
     test_mem_regions.c
     test_model_registry.c
     test_scheduler.c
+    test_layer_preempt.c
     test_infer_pipeline.c
     test_process.c
     test_ipc.c
@@ -21,7 +22,9 @@ target_sources(app PRIVATE
 
 target_link_libraries(app PRIVATE synaptic_os)
 
-# Tests exercise private core internals (shared memory layout, ring ops)
+# Tests exercise private core internals (shared memory layout, ring
+# ops, layered execution)
 target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/hal/common
 )

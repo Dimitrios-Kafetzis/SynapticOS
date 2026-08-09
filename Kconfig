@@ -53,6 +53,26 @@ config SYNAPTIC_MAX_PIPELINE_STAGES
       Maximum number of stages (preprocess + model + postprocess)
       in a single inference pipeline.
 
+config SYNAPTIC_LAYER_EXEC
+    bool "Layer-granular execution and preemption"
+    default y
+    help
+      Execute models in the synthetic layered format (magic "SYNL")
+      one layer at a time, letting the scheduler preempt a
+      preemptible job at a layer boundary when a higher-priority job
+      arrives and resume it later from saved context. Costs a live
+      context, a scratch buffer and two suspension slots, each
+      SYNAPTIC_LAYER_ACT_MAX bytes plus a small header.
+
+config SYNAPTIC_LAYER_ACT_MAX
+    int "Layered-model activation buffer size in bytes"
+    depends on SYNAPTIC_LAYER_EXEC
+    default 1024
+    range 64 4096
+    help
+      Largest activation (layer output) a layered model may produce.
+      Bounds the RAM cost of layer-granular execution contexts.
+
 config SYNAPTIC_POWERQUAD
     bool "Use PowerQuad hardware acceleration"
     depends on SOC_SERIES_MCXNX4X

@@ -51,6 +51,10 @@ zephyr_library_sources(
     src/hal/common/syn_dsp_soft.c
 )
 
+zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_LAYER_EXEC
+    src/hal/common/syn_npu_layered.c
+)
+
 if(CONFIG_SOC_SERIES_MCXNX4X)
     zephyr_library_sources(
         src/hal/mcxn947/syn_hal_npu_neutron.c

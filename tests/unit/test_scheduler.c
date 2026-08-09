@@ -17,7 +17,12 @@
 
 #define SCHED_INPUT_SIZE 48
 
-static uint8_t sched_arena[4096] __aligned(16);
+/* Shared with test_layer_preempt.c: suites run sequentially and each
+ * suite's before() re-initializes the arena, so one 4 KB region
+ * serves both without doubling the QEMU RAM cost.
+ */
+uint8_t test_infer_arena[4096] __aligned(16);
+#define sched_arena test_infer_arena
 static const uint8_t sched_model_bin[32] = {0};
 static syn_model_handle_t sched_model;
 
