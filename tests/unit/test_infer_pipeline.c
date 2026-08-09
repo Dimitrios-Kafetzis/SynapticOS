@@ -10,7 +10,9 @@
 #include <synaptic/syn_model.h>
 #include <string.h>
 
-static uint8_t pipe_arena[4096] __aligned(16);
+#include "test_common.h"
+
+#define pipe_arena test_shared_arena
 static syn_model_handle_t test_model;
 
 /* Passthrough stage: copy input to output, keep geometry */

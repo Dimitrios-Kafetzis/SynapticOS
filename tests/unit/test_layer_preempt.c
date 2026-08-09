@@ -26,12 +26,9 @@
 #define LP_OUTPUT_SIZE  10
 #define LP_LAYERS       8
 
-/* Arena shared with test_scheduler.c (see there): the layered
- * pipeline only allocates small stage outputs from it, activations
- * live in the layered module's own context.
- */
-extern uint8_t test_infer_arena[4096];
-#define lp_arena test_infer_arena
+#include "test_common.h"
+
+#define lp_arena test_shared_arena
 
 /* 8 layers sized so one job spans several tens of ms and a test
  * sleeping 8 ms reliably lands mid-execution. The busy-work constant
@@ -95,15 +92,21 @@ static void make_inputs(void)
 	tensor_b.lifetime = SYN_MEM_SHARED;
 }
 
-static syn_pipeline_t *make_pipe(const char *name)
+static syn_pipeline_t *make_pipe_for(const char *name,
+				     syn_model_handle_t model)
 {
 	syn_pipeline_t *pipe = syn_pipeline_create(name);
 
 	zassert_not_null(pipe, "pipeline create failed");
-	zassert_equal(syn_pipeline_add_model(pipe, lp_model), 0,
+	zassert_equal(syn_pipeline_add_model(pipe, model), 0,
 		      "add_model failed");
 	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
 	return pipe;
+}
+
+static syn_pipeline_t *make_pipe(const char *name)
+{
+	return make_pipe_for(name, lp_model);
 }
 
 static void *lp_suite_setup(void)
@@ -391,6 +394,205 @@ ZTEST(syn_layer_preempt_suite, test_deadline_miss_counted)
 		     "deadline miss must be counted");
 
 	syn_pipeline_destroy(pipe);
+	syn_mem_reset_ephemeral();
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 5.2: DAG models and memory-optimal activation placement      */
+/* ------------------------------------------------------------------ */
+
+#define DAG_LAYERS 6
+#define DAG_OUTPUT 10
+
+/* L4 consumes both its predecessor and L0's output (a long skip),
+ * forcing the planner to keep L0's activation alive across L1-L4.
+ */
+static const syn_layered_dag_layer_t dag_layers[DAG_LAYERS] = {
+	{ 48, 0, SYN_LAYERED_SRC_PREV, SYN_LAYERED_SRC_NONE },
+	{ 48, 0, SYN_LAYERED_SRC_PREV, SYN_LAYERED_SRC_NONE },
+	{ 48, 0, SYN_LAYERED_SRC_PREV, SYN_LAYERED_SRC_NONE },
+	{ 48, 0, SYN_LAYERED_SRC_PREV, SYN_LAYERED_SRC_NONE },
+	{ 48, 0, SYN_LAYERED_SRC_PREV, 0 },
+	{ DAG_OUTPUT, 0, SYN_LAYERED_SRC_PREV, SYN_LAYERED_SRC_NONE },
+};
+
+static uint8_t dag_blob[SYN_LAYERED_HDR_SIZE +
+			DAG_LAYERS * SYN_LAYERED_DDESC_SIZE];
+
+/** Reference executor with every activation in its own buffer. */
+static void dag_reference(const uint8_t *input, uint16_t input_size,
+			  uint8_t *final_out)
+{
+	static uint8_t bufs[DAG_LAYERS + 1][64];
+	static uint16_t sizes[DAG_LAYERS + 1];
+
+	memcpy(bufs[0], input, input_size);
+	sizes[0] = input_size;
+
+	for (uint16_t i = 0; i < DAG_LAYERS; i++) {
+		int src_a = (dag_layers[i].src_a == SYN_LAYERED_SRC_PREV) ?
+			    (int)i : dag_layers[i].src_a + 1;
+		int src_b = (dag_layers[i].src_b == SYN_LAYERED_SRC_NONE) ?
+			    -1 : dag_layers[i].src_b + 1;
+		const uint8_t *a = bufs[src_a];
+		uint16_t a_size = sizes[src_a];
+		uint16_t out = dag_layers[i].out_size;
+
+		for (uint16_t j = 0; j < out; j++) {
+			uint32_t acc = (uint32_t)a[j % a_size] * 31U +
+				       a[(j * 7U + i) % a_size] +
+				       (uint32_t)i * 13U +
+				       (uint32_t)j * 3U;
+
+			if (src_b >= 0) {
+				acc += (uint32_t)bufs[src_b][j %
+					sizes[src_b]] * 17U;
+			}
+			bufs[i + 1][j] = (uint8_t)acc;
+		}
+		sizes[i + 1] = out;
+	}
+	memcpy(final_out, bufs[DAG_LAYERS], DAG_OUTPUT);
+}
+
+static void load_dag_model(syn_model_handle_t *handle, uint16_t work)
+{
+	syn_layered_dag_layer_t layers[DAG_LAYERS];
+
+	memcpy(layers, dag_layers, sizeof(layers));
+	for (int i = 0; i < DAG_LAYERS; i++) {
+		layers[i].work = work;
+	}
+
+	int size = syn_npu_layered_make_dag(dag_blob, sizeof(dag_blob),
+					    LP_INPUT_SIZE, DAG_LAYERS,
+					    layers);
+
+	zassert_true(size > 0, "make_dag failed: %d", size);
+	zassert_equal(syn_hal_npu_load_model(dag_blob, (size_t)size), 0,
+		      "DAG blob load failed");
+
+	if (syn_model_get_by_name("dag_test", handle) != 0) {
+		syn_model_info_t info = {0};
+
+		strncpy(info.name, "dag_test", sizeof(info.name));
+		strncpy(info.version, "1.0.0", sizeof(info.version));
+		info.input_size = LP_INPUT_SIZE;
+		info.output_size = DAG_OUTPUT;
+		info.input_dtype = SYN_NPU_DTYPE_INT8;
+		info.output_dtype = SYN_NPU_DTYPE_INT8;
+		zassert_equal(syn_model_register(&info, handle), 0,
+			      "DAG model register failed");
+	}
+}
+
+/** DAG execution matches an all-buffers-live reference bit-exactly. */
+ZTEST(syn_layer_preempt_suite, test_dag_reference_exact)
+{
+	syn_model_handle_t dag_model;
+
+	load_dag_model(&dag_model, 0);
+
+	int8_t out_buf[DAG_OUTPUT];
+	syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+
+	zassert_equal(syn_infer_run_sync(dag_model, &tensor_a, &out,
+					 SYN_PRIORITY_NORMAL), 0,
+		      "DAG run_sync failed");
+	syn_mem_reset_ephemeral();
+	zassert_equal(out.size, DAG_OUTPUT, "wrong DAG output size");
+
+	uint8_t expect[DAG_OUTPUT];
+
+	dag_reference(input_a, LP_INPUT_SIZE, expect);
+	zassert_mem_equal(out_buf, expect, DAG_OUTPUT,
+			  "planned execution must match the reference");
+}
+
+/** The planner beats the all-live baseline by at least 30%. */
+ZTEST(syn_layer_preempt_suite, test_plan_peak_reduction)
+{
+	syn_model_handle_t dag_model;
+
+	load_dag_model(&dag_model, 0);
+
+	int8_t out_buf[DAG_OUTPUT];
+	syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+
+	zassert_equal(syn_infer_run_sync(dag_model, &tensor_a, &out,
+					 SYN_PRIORITY_NORMAL), 0,
+		      "DAG run_sync failed");
+	syn_mem_reset_ephemeral();
+
+	uint32_t planned, naive, plan_us;
+
+	syn_npu_layered_plan_info(&planned, &naive, &plan_us);
+	zassert_true(naive > 0, "plan info must be populated");
+	zassert_true(planned * 10U <= naive * 7U,
+		     "planned peak %u must be at least 30%% below the "
+		     "all-live sum %u", planned, naive);
+	zassert_true(plan_us < 1000U,
+		     "planning took %u us (>= 1 ms)", plan_us);
+}
+
+/** Preempt + resume on a DAG model: the parked context preserves the
+ *  long-lived skip activation and the result stays bit-exact.
+ */
+ZTEST(syn_layer_preempt_suite, test_dag_preempt_bit_exact)
+{
+	syn_model_handle_t dag_model;
+
+	load_dag_model(&dag_model, LP_WORK);
+
+	uint8_t expect[DAG_OUTPUT];
+
+	dag_reference(input_a, LP_INPUT_SIZE, expect);
+
+	syn_infer_stats_t st0, st1;
+
+	syn_infer_get_stats(&st0);
+
+	syn_pipeline_t *pn = make_pipe_for("dagpre_n", dag_model);
+	syn_pipeline_t *pr = make_pipe_for("dagpre_r", dag_model);
+
+	syn_infer_params_t normal_params = {
+		.priority = SYN_PRIORITY_NORMAL,
+		.preemptible = true,
+		.callback = order_cb,
+		.user_data = (void *)1,
+	};
+	syn_job_id_t jn = syn_infer_submit(pn, &tensor_a, &normal_params);
+
+	zassert_not_equal(jn, SYN_JOB_INVALID, "NORMAL submit failed");
+	k_msleep(8);
+
+	syn_infer_params_t rt_params = {
+		.priority = SYN_PRIORITY_REALTIME,
+		.callback = order_cb,
+		.user_data = (void *)2,
+	};
+	syn_job_id_t jr = syn_infer_submit(pr, &tensor_b, &rt_params);
+
+	zassert_not_equal(jr, SYN_JOB_INVALID, "RT submit failed");
+
+	zassert_equal(syn_infer_wait(jr, 5000), 0, "RT wait failed");
+	zassert_equal(syn_infer_wait(jn, 5000), 0, "NORMAL wait failed");
+	zassert_equal(done_order[0], 2, "RT must complete first");
+
+	syn_tensor_t rn, rr;
+
+	zassert_equal(syn_infer_get_result(jr, &rr), 0, "RT result failed");
+	zassert_equal(syn_infer_get_result(jn, &rn), 0,
+		      "NORMAL result failed");
+	zassert_mem_equal(rn.data, expect, DAG_OUTPUT,
+			  "resumed DAG output must match the reference");
+
+	syn_infer_get_stats(&st1);
+	zassert_true(st1.preemptions > st0.preemptions,
+		     "the NORMAL DAG job must have been preempted");
+
+	syn_pipeline_destroy(pn);
+	syn_pipeline_destroy(pr);
 	syn_mem_reset_ephemeral();
 }
 

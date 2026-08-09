@@ -13,7 +13,9 @@
 #include <string.h>
 #include <math.h>
 
-static uint8_t proc_arena[4096] __aligned(16);
+#include "test_common.h"
+
+#define proc_arena test_shared_arena
 static const uint8_t proc_model_bin[32] = {0};
 static syn_model_handle_t proc_model;
 

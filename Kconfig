@@ -70,8 +70,20 @@ config SYNAPTIC_LAYER_ACT_MAX
     default 1024
     range 64 4096
     help
-      Largest activation (layer output) a layered model may produce.
-      Bounds the RAM cost of layer-granular execution contexts.
+      Largest single activation (layer output) a layered model may
+      produce.
+
+config SYNAPTIC_LAYER_PLAN_MAX
+    int "Layered-model activation plan area size in bytes"
+    depends on SYNAPTIC_LAYER_EXEC
+    default 2048
+    range 128 16384
+    help
+      Size of the shared activation plan area all live activations
+      of a layered model are placed into (memory-optimal placement,
+      Phase 5.2). Must hold the planned peak of the deepest model in
+      use; sessions whose planned peak exceeds it are rejected at
+      begin. Also sets the size of each of the two suspension slots.
 
 config SYNAPTIC_POWERQUAD
     bool "Use PowerQuad hardware acceleration"

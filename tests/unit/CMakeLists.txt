@@ -4,6 +4,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(synaptic_unit_tests)
 
 target_sources(app PRIVATE
+    test_common.c
     test_mem.c
     test_mem_bench.c
     test_mem_regions.c

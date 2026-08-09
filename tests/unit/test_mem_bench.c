@@ -15,8 +15,10 @@
 
 LOG_MODULE_REGISTER(test_mem_bench, LOG_LEVEL_INF);
 
-#define BENCH_ARENA_SIZE (8 * 1024) /* 8 KB test arena */
-static uint8_t __aligned(16) bench_arena[BENCH_ARENA_SIZE];
+#include "test_common.h"
+
+#define BENCH_ARENA_SIZE TEST_SHARED_ARENA_SIZE
+#define bench_arena      test_shared_arena
 
 ZTEST_SUITE(syn_mem_bench_suite, NULL, NULL, NULL, NULL, NULL);
 

@@ -553,6 +553,32 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+#include "../hal/common/syn_npu_layered.h"
+
+/* syn npu plan */
+static int cmd_npu_plan(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	uint32_t planned, naive, plan_us;
+
+	syn_npu_layered_plan_info(&planned, &naive, &plan_us);
+	if (naive == 0U) {
+		shell_print(sh, "No layered session has run yet");
+		return 0;
+	}
+	shell_print(sh, "Activation placement of the last layered session:");
+	shell_print(sh, "  planned peak: %u bytes", planned);
+	shell_print(sh, "  all-live sum: %u bytes (naive baseline)", naive);
+	shell_print(sh, "  reduction:    %u%%",
+		    (unsigned)(100U - (planned * 100U / naive)));
+	shell_print(sh, "  planning:     %u us", plan_us);
+	return 0;
+}
+#endif /* CONFIG_SYNAPTIC_LAYER_EXEC */
+
 /* syn infer stats */
 static int cmd_infer_stats(const struct shell *sh, size_t argc, char **argv)
 {
@@ -905,6 +931,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_model,
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_npu,
 	SHELL_CMD(caps, NULL, "Show NPU capabilities", cmd_npu_caps),
 	SHELL_CMD(state, NULL, "Show NPU state", cmd_npu_state),
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	SHELL_CMD(plan, NULL, "Show layered activation placement",
+		  cmd_npu_plan),
+#endif
 	SHELL_SUBCMD_SET_END
 );
 
