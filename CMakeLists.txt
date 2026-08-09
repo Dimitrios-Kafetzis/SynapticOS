@@ -24,6 +24,10 @@ zephyr_library_sources_ifdef(CONFIG_SYNAPTIC
     src/core/syn_drain_gate.c
 )
 
+zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_HEALTH
+    src/core/syn_health.c
+)
+
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_DUAL_CORE
     src/core/syn_ipc.c
     src/core/syn_boot.c

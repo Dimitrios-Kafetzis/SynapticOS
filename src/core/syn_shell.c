@@ -600,6 +600,74 @@ static int cmd_infer_stats(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#ifdef CONFIG_SYNAPTIC_HEALTH
+#include "syn_health.h"
+
+/* syn health */
+static int cmd_health(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Watchdog: %s",
+		    syn_health_watchdog_armed() ?
+		    "armed (fed by the monitor)" : "absent");
+	shell_print(sh, "Stale episodes: %u", syn_health_fault_count());
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+	shell_print(sh, "CPU1 recoveries: %u",
+		    syn_health_cpu1_recoveries());
+#endif
+
+	syn_health_info_t info;
+
+	for (int i = 0; syn_health_get(i, &info) == 0; i++) {
+		shell_print(sh, "  %-8s period %u ms, last kick %lld ms "
+			    "ago, %s%s, %u stale episodes", info.name,
+			    info.period_ms, info.age_ms,
+			    info.busy ? "busy" : "idle",
+			    info.stale ? " (STALE)" : "",
+			    info.stale_count);
+	}
+	return 0;
+}
+
+/* syn health hang <cpu0|cpu1>: fault-injection for the watchdog and
+ * recovery demos. cpu0 stops all scheduling on this core, so the
+ * hardware watchdog (when armed) is the only way back.
+ */
+static int cmd_health_hang(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+
+	if (strcmp(argv[1], "cpu0") == 0) {
+		shell_print(sh, "Hanging CPU0 with the scheduler locked; "
+				"only the watchdog can recover this...");
+		/* Give the UART a moment to drain the message */
+		k_msleep(50);
+		k_sched_lock();
+		while (1) {
+		}
+		return 0; /* unreachable */
+	}
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+	if (strcmp(argv[1], "cpu1") == 0) {
+		syn_shm_region_t *shm_dbg = syn_ipc_region();
+
+		if (shm_dbg == NULL) {
+			shell_error(sh, "IPC region not initialized");
+			return -ENODEV;
+		}
+		shm_dbg->ctrl.debug_cmd = SYN_SHM_DEBUG_CPU1_HANG;
+		shell_print(sh, "CPU1 hang requested; watch the log for "
+				"heartbeat-loss recovery");
+		return 0;
+	}
+#endif
+	shell_error(sh, "Usage: syn health hang <cpu0|cpu1>");
+	return -EINVAL;
+}
+#endif /* CONFIG_SYNAPTIC_HEALTH */
+
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
 /* syn ipc status */
 static int cmd_ipc_status(const struct shell *sh, size_t argc, char **argv)
@@ -1000,8 +1068,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ota,
 );
 #endif
 
+#ifdef CONFIG_SYNAPTIC_HEALTH
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_health,
+	SHELL_CMD_ARG(hang, NULL,
+		      "Fault injection: syn health hang <cpu0|cpu1>",
+		      cmd_health_hang, 2, 0),
+	SHELL_SUBCMD_SET_END
+);
+#endif
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(version, NULL, "Print SynapticOS version", cmd_version),
+#ifdef CONFIG_SYNAPTIC_HEALTH
+	SHELL_CMD(health, &sub_health, "Health monitor status", cmd_health),
+#endif
 	SHELL_CMD(mem, &sub_mem, "Memory management", NULL),
 	SHELL_CMD(model, &sub_model, "Model management", NULL),
 	SHELL_CMD(npu, &sub_npu, "NPU control", NULL),

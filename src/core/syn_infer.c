@@ -51,10 +51,19 @@ LOG_MODULE_REGISTER(syn_infer, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #include "syn_prof_internal.h"
 #include "syn_infer_internal.h"
+#include "syn_health.h"
 
 #ifdef CONFIG_SYNAPTIC_LAYER_EXEC
 #include "../hal/common/syn_npu_layered.h"
 #endif
+
+/* Health check-in period while executing a job (5.4). Layered jobs
+ * kick at every layer boundary; a monolithic invoke must simply
+ * finish inside this window.
+ */
+#define SCHED_HEALTH_PERIOD_MS 5000
+
+static int sched_health_id = -1;
 
 #define SYN_MAX_PIPELINES      4
 #define STAGE_MIN_CAPACITY     64
@@ -492,6 +501,7 @@ static int execute_layered(struct infer_job *job,
 		if (rem < 0) {
 			return rem;
 		}
+		syn_health_kick(sched_health_id);
 		if (rem > 0 && job->params.preemptible &&
 		    preempt_pending(job)) {
 			uint32_t t0 = k_cycle_get_32();
@@ -763,7 +773,9 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	while (1) {
+		syn_health_set_busy(sched_health_id, false);
 		k_sem_take(&sched_wake, K_FOREVER);
+		syn_health_set_busy(sched_health_id, true);
 
 		k_mutex_lock(&infer_lock, K_FOREVER);
 
@@ -1187,6 +1199,10 @@ static int syn_infer_sys_init(void)
 	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
 		k_sem_init(&jobs[i].done, 0, 1);
 	}
+
+	sched_health_id = syn_health_register("sched",
+					      SCHED_HEALTH_PERIOD_MS);
+	syn_health_set_busy(sched_health_id, false);
 	return 0;
 }
 
