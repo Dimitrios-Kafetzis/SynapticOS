@@ -22,6 +22,7 @@ zephyr_library_sources_ifdef(CONFIG_SYNAPTIC
     src/core/syn_infer.c
     src/core/syn_ipc_ring.c
     src/core/syn_drain_gate.c
+    src/core/syn_ingest.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC_HEALTH
@@ -64,7 +65,7 @@ if(CONFIG_SOC_SERIES_MCXNX4X)
     zephyr_library_sources(
         src/hal/mcxn947/syn_hal_npu_neutron.c
         src/hal/mcxn947/syn_hal_dsp_pq.c
-        src/hal/mcxn947/syn_hal_dma_sdma.c
+        src/hal/mcxn947/syn_hal_dma_edma.c
     )
     if(CONFIG_SYNAPTIC_POWERQUAD)
         # PowerQuad SDK driver has no Zephyr glue in this hal_nxp
@@ -88,6 +89,7 @@ else()
     zephyr_library_sources(
         src/hal/stub/syn_hal_npu_stub.c
         src/hal/stub/syn_hal_dsp_stub.c
+        src/hal/stub/syn_hal_dma_stub.c
     )
 endif()
 

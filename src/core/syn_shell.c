@@ -474,6 +474,164 @@ static const char *priority_name(syn_priority_t prio)
 	}
 }
 
+/* syn dma bench [frames]: double-buffered zero-copy ingest vs a
+ * sequential CPU-copy baseline. The synthetic source stamps a
+ * 64-byte header per frame over a static body; processing verifies
+ * the stamp and word-checksums the whole frame, so torn or stale
+ * frames are caught byte-exactly. On QEMU the DMA stub copies on
+ * the CPU: numbers there are functional, not a throughput claim.
+ */
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+#define DMA_BENCH_FRAME  8192
+#else
+#define DMA_BENCH_FRAME  512
+#endif
+#define DMA_BENCH_STAMP  64
+#define DMA_BENCH_CH     0
+
+#include "syn_ingest.h"
+#include <synaptic/syn_hal_dma.h>
+
+struct dma_bench_ctx {
+	uint32_t bad_frames;
+	uint32_t checksum;
+};
+
+static void dma_bench_fill(void *src, size_t size, uint32_t seq,
+			   void *user)
+{
+	ARG_UNUSED(user);
+
+	uint8_t *p = src;
+	size_t stamp = MIN((size_t)DMA_BENCH_STAMP, size);
+
+	for (size_t i = 0; i < stamp; i++) {
+		p[i] = (uint8_t)(seq * 31U + i * 7U);
+	}
+}
+
+static void dma_bench_process(const void *frame, size_t size,
+			      uint32_t seq, void *user)
+{
+	struct dma_bench_ctx *ctx = user;
+	const uint8_t *p = frame;
+	size_t stamp = MIN((size_t)DMA_BENCH_STAMP, size);
+
+	for (size_t i = 0; i < stamp; i++) {
+		if (p[i] != (uint8_t)(seq * 31U + i * 7U)) {
+			ctx->bad_frames++;
+			return;
+		}
+	}
+
+	const uint32_t *w = frame;
+
+	for (size_t i = 0; i < size / 4U; i++) {
+		ctx->checksum += w[i];
+	}
+}
+
+static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
+{
+	uint32_t frames = (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 0)
+				      : 64U;
+
+	if (frames == 0U) {
+		shell_error(sh, "frames must be > 0");
+		return -EINVAL;
+	}
+
+	int ret = syn_hal_dma_init();
+
+	if (ret != 0 && ret != -EALREADY) {
+		shell_error(sh, "DMA unavailable: %d", ret);
+		return ret;
+	}
+
+	uint8_t *src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
+
+	if (src == NULL) {
+		shell_error(sh, "scratch pool too small for a %u-byte "
+			    "frame", DMA_BENCH_FRAME);
+		return -ENOMEM;
+	}
+
+	uint32_t shape[1] = { DMA_BENCH_FRAME };
+	syn_tensor_t *b0 = syn_mem_tensor_alloc(shape, 1,
+						SYN_NPU_DTYPE_UINT8,
+						SYN_MEM_EPHEMERAL);
+	syn_tensor_t *b1 = syn_mem_tensor_alloc(shape, 1,
+						SYN_NPU_DTYPE_UINT8,
+						SYN_MEM_EPHEMERAL);
+
+	if (b0 == NULL || b1 == NULL) {
+		shell_error(sh, "arena too small for two %u-byte buffers",
+			    DMA_BENCH_FRAME);
+		syn_mem_scratch_release(src);
+		syn_mem_reset_ephemeral();
+		return -ENOMEM;
+	}
+
+	/* Static frame body under the per-frame stamp */
+	memset(src, 0x5A, DMA_BENCH_FRAME);
+
+	struct dma_bench_ctx ctx = {0};
+
+	/* CPU-copy baseline: fill -> memcpy -> process, sequential */
+	uint32_t t0 = k_cycle_get_32();
+
+	for (uint32_t seq = 0; seq < frames; seq++) {
+		dma_bench_fill(src, DMA_BENCH_FRAME, seq, NULL);
+		memcpy(b0->data, src, DMA_BENCH_FRAME);
+		dma_bench_process(b0->data, DMA_BENCH_FRAME, seq, &ctx);
+	}
+
+	uint32_t cpu_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+	uint32_t cpu_bad = ctx.bad_frames;
+
+	/* Zero-copy path: DMA into ping/pong, processing overlapped */
+	ctx.bad_frames = 0;
+
+	syn_ingest_config_t icfg = {
+		.src = src,
+		.bufs = { b0->data, b1->data },
+		.frame_size = DMA_BENCH_FRAME,
+		.dma_channel = DMA_BENCH_CH,
+		.fill = dma_bench_fill,
+		.process = dma_bench_process,
+		.user = &ctx,
+	};
+
+	ret = syn_ingest_run(&icfg, frames);
+
+	syn_ingest_stats_t st;
+
+	syn_ingest_last_stats(&st);
+	syn_mem_scratch_release(src);
+	syn_mem_reset_ephemeral();
+
+	if (ret != 0) {
+		shell_error(sh, "ingest failed: %d (frames %u, dma errors "
+			    "%u)", ret, st.frames, st.dma_errors);
+		return ret;
+	}
+
+	shell_print(sh, "%u frames of %u bytes:", frames, DMA_BENCH_FRAME);
+	shell_print(sh, "  cpu copy:  %u us (%u us/frame), %u corrupt",
+		    cpu_us, cpu_us / frames, cpu_bad);
+	shell_print(sh, "  dma ingest:%u us (%u us/frame), %u corrupt, "
+		    "%u dma errors", st.elapsed_us, st.elapsed_us / frames,
+		    ctx.bad_frames, st.dma_errors);
+	if (st.elapsed_us > 0U && st.elapsed_us < cpu_us) {
+		shell_print(sh, "  frame rate gain: +%u%%",
+			    (unsigned)((cpu_us - st.elapsed_us) * 100U /
+				       st.elapsed_us));
+	} else {
+		shell_print(sh, "  no gain on this target");
+	}
+	return 0;
+}
+
 /* syn infer run <model-name> [priority] */
 static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 {
@@ -1019,6 +1177,13 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_dsp,
 	SHELL_SUBCMD_SET_END
 );
 
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_dma,
+	SHELL_CMD_ARG(bench, NULL,
+		      "Zero-copy ingest vs CPU copy: syn dma bench "
+		      "[frames]", cmd_dma_bench, 1, 1),
+	SHELL_SUBCMD_SET_END
+);
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_infer,
 	SHELL_CMD_ARG(run, &dsub_model_name,
 		      "Run inference: syn infer run <model-name> "
@@ -1086,6 +1251,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_syn,
 	SHELL_CMD(model, &sub_model, "Model management", NULL),
 	SHELL_CMD(npu, &sub_npu, "NPU control", NULL),
 	SHELL_CMD(dsp, &sub_dsp, "DSP operations", NULL),
+	SHELL_CMD(dma, &sub_dma, "DMA operations", NULL),
 	SHELL_CMD(infer, &sub_infer, "Inference control", NULL),
 	SHELL_CMD(prof, &sub_prof, "Profiling", NULL),
 #ifdef CONFIG_SYNAPTIC_MPU_PROTECT

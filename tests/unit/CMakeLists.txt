@@ -16,6 +16,7 @@ target_sources(app PRIVATE
     test_ipc.c
     test_drain_gate.c
     test_health.c
+    test_dma_ingest.c
     test_npu_hal.c
     test_dsp_hal.c
     test_dsp_verify.c
