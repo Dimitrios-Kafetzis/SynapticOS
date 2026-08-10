@@ -25,6 +25,7 @@ Thumbs.db
 # Binary models (track with Git LFS or download)
 *.tflite
 *.synm
+*.synn
 !models/README.md
 
 # Internal docs (keep only public-facing docs)

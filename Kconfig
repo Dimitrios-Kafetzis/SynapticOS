@@ -144,6 +144,7 @@ config SYNAPTIC_NEUTRON
     bool "Use the eIQ Neutron NPU (requires the optional eIQ module)"
     depends on SOC_SERIES_MCXNX4X && !SOC_MCXN947_CPU1
     select FPU
+    select FPU_SHARING if MULTITHREADING
     help
       Drive the eIQ Neutron NPU through NXP's precompiled
       libNeutronDriver/libNeutronFirmware. Those libraries are
@@ -156,6 +157,29 @@ config SYNAPTIC_NEUTRON
       (LiteRT/TFLite input). When disabled, the NPU HAL keeps the
       stub passthrough behavior and the build is identical to a
       pre-Neutron tree.
+
+config SYNAPTIC_NEUTRON_CTX_MAX
+    int "Neutron model context buffer size in bytes"
+    depends on SYNAPTIC_NEUTRON
+    default 4096
+    range 256 32768
+    help
+      Static buffer handed to neutronModelPrepare as the model
+      context, sized by neutronGetModelContextSize at load time
+      (loads needing more are rejected with a log telling you to
+      raise this). Keeps the driver off the heap entirely.
+
+config SYNAPTIC_NEUTRON_SCRATCH_SIZE
+    int "Neutron scratch buffer size in bytes"
+    depends on SYNAPTIC_NEUTRON
+    default 16384
+    range 1024 262144
+    help
+      Static scratch buffer passed to every neutronRunBlocking call
+      for intermediate tensors. The required size is model-specific;
+      size it from the neutron-converter memory report of the
+      largest deployed model. A NULL buffer would make the driver
+      allocate from the heap, which this HAL never does.
 
 config SYNAPTIC_POWERQUAD
     bool "Use PowerQuad hardware acceleration"
