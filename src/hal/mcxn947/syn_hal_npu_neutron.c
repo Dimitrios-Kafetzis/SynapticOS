@@ -15,6 +15,8 @@
 #include <synaptic/syn_hal_npu.h>
 #include <string.h>
 
+#include "../common/syn_npu_layered.h"
+
 LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 /* TODO: Replace with real Neutron SDK includes when available:
@@ -122,6 +124,7 @@ int syn_hal_npu_load_model(const uint8_t *model_data, size_t model_size)
 	npu.model_data = model_data;
 	npu.model_size = model_size;
 	npu.model_loaded = true;
+	syn_npu_layered_on_load(model_data, model_size);
 
 	LOG_INF("Model loaded: %zu bytes (stub inference)", model_size);
 	return 0;

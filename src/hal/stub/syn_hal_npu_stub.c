@@ -12,6 +12,8 @@
 #include <synaptic/syn_hal_npu.h>
 #include <string.h>
 
+#include "../common/syn_npu_layered.h"
+
 LOG_MODULE_REGISTER(syn_hal_npu_stub, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #define STUB_MAX_MODEL_SIZE    (256 * 1024)
@@ -88,6 +90,7 @@ int syn_hal_npu_load_model(const uint8_t *model_data, size_t model_size)
 
 	stub.model_size = model_size;
 	stub.model_loaded = true;
+	syn_npu_layered_on_load(model_data, model_size);
 
 	LOG_INF("Model loaded: %zu bytes", model_size);
 	return 0;

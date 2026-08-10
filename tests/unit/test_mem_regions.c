@@ -14,8 +14,10 @@
 
 LOG_MODULE_REGISTER(test_mem_regions, LOG_LEVEL_INF);
 
-#define REGION_ARENA_SIZE (8 * 1024) /* 8 KB test arena */
-static uint8_t __aligned(16) region_arena[REGION_ARENA_SIZE];
+#include "test_common.h"
+
+#define REGION_ARENA_SIZE TEST_SHARED_ARENA_SIZE
+#define region_arena      test_shared_arena
 
 ZTEST_SUITE(syn_mem_regions_suite, NULL, NULL, NULL, NULL, NULL);
 

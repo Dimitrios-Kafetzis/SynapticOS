@@ -20,6 +20,8 @@ LOG_MODULE_REGISTER(syn_mem, CONFIG_SYNAPTIC_LOG_LEVEL);
 #include <synaptic/syn_mem.h>
 #include <string.h>
 
+#include "syn_mem_internal.h"
+
 #define ALIGN_UP(x, align) (((x) + (align) - 1) & ~((size_t)(align) - 1))
 #define TENSOR_ALIGNMENT 16
 
@@ -254,6 +256,25 @@ int syn_mem_get_stats(syn_mem_stats_t *stats)
 	stats->scratch_used = arena.scratch_used;
 	stats->alloc_count = arena.alloc_count;
 	stats->reset_count = arena.reset_count;
+	return 0;
+}
+
+int syn_mem_get_layout(syn_mem_layout_t *layout)
+{
+	if (layout == NULL) {
+		return -EINVAL;
+	}
+	if (!arena.initialized) {
+		return -ENODEV;
+	}
+
+	layout->base = arena.base;
+	layout->total = arena.total;
+	layout->usable = arena.usable;
+	layout->persistent_used = arena.persistent_used;
+	layout->ephemeral_used = arena.ephemeral_used;
+	layout->scratch_total = arena.scratch_total;
+	layout->scratch_used = arena.scratch_used;
 	return 0;
 }
 

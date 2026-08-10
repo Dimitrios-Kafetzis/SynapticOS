@@ -71,9 +71,17 @@ extern "C" {
  */
 #define SYN_BOOT_CPU1_VECTOR    0x00100000UL
 
-/* Layout identification */
+/* Layout identification. Version 2: cpu1_heartbeat + debug_cmd took
+ * two control-block reserved words (Phase 5.4 health monitor).
+ */
 #define SYN_SHM_MAGIC           0x53594E33UL /* "SYN3" */
-#define SYN_SHM_LAYOUT_VERSION  1UL
+#define SYN_SHM_LAYOUT_VERSION  2UL
+
+/* debug_cmd values (CPU0 writes, CPU1 acts) */
+#define SYN_SHM_DEBUG_CPU1_HANG 0x48414E47UL /* "HANG": stop the
+					      * heartbeat and spin with
+					      * interrupts off - health
+					      * recovery demo */
 
 /*
  * Ring size seam: CONFIG_SYNAPTIC_IPC_RING_SIZE only exists on
@@ -106,7 +114,9 @@ typedef struct {
 	volatile uint32_t rtt_min_us;
 	volatile uint32_t rtt_max_us;
 	volatile uint32_t rtt_count;
-	uint32_t reserved[6];    /**< Pad control block to 64 bytes      */
+	volatile uint32_t cpu1_heartbeat; /**< CPU1 ticks every 100 ms  */
+	volatile uint32_t debug_cmd;      /**< Debug requests to CPU1   */
+	uint32_t reserved[4];    /**< Pad control block to 64 bytes      */
 } syn_shm_ctrl_t;
 
 /**

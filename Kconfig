@@ -1,6 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SynapticOS Kconfig
 
+# Library-only gcov instrumentation. Global CONFIG_COVERAGE cannot
+# fit qemu_cortex_m3 (the instrumented image overflows flash by
+# ~245 KB and RAM by ~128 KB), so this instruments ONLY the
+# synaptic_os library and reuses Zephyr's embedded gcov runtime and
+# console dump. Harvest with tools/syn_coverage.sh.
+config SYNAPTIC_COVERAGE
+    bool "gcov-instrument the SynapticOS library"
+    depends on !NATIVE_BUILD
+    select FORCE_COVERAGE
+    select COVERAGE
+    select COVERAGE_DUMP
+
+config SYNAPTIC_COVERAGE_FILES
+    string "src/core file globs to instrument (space-separated)"
+    depends on SYNAPTIC_COVERAGE
+    default "*.c"
+    help
+      Counter RAM scales with instrumented code, and 64 KB QEMU
+      targets cannot always afford all of src/core next to the test
+      fixtures (tests/unit_store carries an 18 KB RAM flash). Each
+      coverage app narrows this to the files its suites exercise;
+      gcovr merges the runs into one report.
+
 menuconfig SYNAPTIC
     bool "SynapticOS AI Runtime"
     depends on SOC_SERIES_MCXNX4X || BOARD_QEMU_CORTEX_M3
@@ -52,6 +75,70 @@ config SYNAPTIC_MAX_PIPELINE_STAGES
     help
       Maximum number of stages (preprocess + model + postprocess)
       in a single inference pipeline.
+
+config SYNAPTIC_LAYER_EXEC
+    bool "Layer-granular execution and preemption"
+    default y
+    help
+      Execute models in the synthetic layered format (magic "SYNL")
+      one layer at a time, letting the scheduler preempt a
+      preemptible job at a layer boundary when a higher-priority job
+      arrives and resume it later from saved context. Costs a live
+      context, a scratch buffer and two suspension slots, each
+      SYNAPTIC_LAYER_ACT_MAX bytes plus a small header.
+
+config SYNAPTIC_LAYER_ACT_MAX
+    int "Layered-model activation buffer size in bytes"
+    depends on SYNAPTIC_LAYER_EXEC
+    default 1024
+    range 64 4096
+    help
+      Largest single activation (layer output) a layered model may
+      produce.
+
+config SYNAPTIC_LAYER_PLAN_MAX
+    int "Layered-model activation plan area size in bytes"
+    depends on SYNAPTIC_LAYER_EXEC
+    default 2048
+    range 128 16384
+    help
+      Size of the shared activation plan area all live activations
+      of a layered model are placed into (memory-optimal placement,
+      Phase 5.2). Must hold the planned peak of the deepest model in
+      use; sessions whose planned peak exceeds it are rejected at
+      begin. Also sets the size of each of the two suspension slots.
+
+config SYNAPTIC_HEALTH
+    bool "Health monitor and watchdog integration"
+    default y
+    help
+      Production-hardening core: registered software sources must
+      check in within their period while busy; a 100 ms monitor
+      thread feeds the hardware watchdog (when CONFIG_WATCHDOG is
+      enabled and the board has a watchdog0 alias) only while all
+      sources are fresh, reports stale sources through a fault
+      callback otherwise, and on dual-core CPU0 builds recovers a
+      hung CPU1 by parking and re-releasing it.
+
+config SYNAPTIC_WATCHDOG_TIMEOUT_MS
+    int "Hardware watchdog timeout in milliseconds"
+    depends on SYNAPTIC_HEALTH && WATCHDOG
+    default 2000
+    range 500 60000
+    help
+      Reset fires this long after the health monitor last considered
+      every source fresh. Must comfortably exceed the health tick
+      (100 ms) plus the longest legitimate scheduling gap.
+
+config SYNAPTIC_CPU1_HANG_MS
+    int "CPU1 heartbeat loss threshold in milliseconds"
+    depends on SYNAPTIC_HEALTH && SYNAPTIC_DUAL_CORE
+    default 500
+    range 200 10000
+    help
+      CPU1 ticks a shared-memory heartbeat every 100 ms. When the
+      counter stalls this long while the link is up, CPU0 parks and
+      re-releases CPU1 (the OTA park/resume machinery).
 
 config SYNAPTIC_POWERQUAD
     bool "Use PowerQuad hardware acceleration"

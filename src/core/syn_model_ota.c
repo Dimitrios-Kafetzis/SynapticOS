@@ -46,7 +46,9 @@ LOG_MODULE_REGISTER(syn_model_ota, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
 #include "syn_boot_internal.h"
+#include "syn_infer_remote.h"
 #define OTA_CPU1_RESUME_TIMEOUT_MS 500U
+#define OTA_SERVE_DRAIN_TIMEOUT_MS 1000U
 #endif
 
 static struct {
@@ -90,6 +92,10 @@ static void cpu1_park(void)
 static void cpu1_unpark(void)
 {
 #if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+	/* Session over: reopen cross-core serve admission (paired with
+	 * the drain in syn_ota_begin; harmless when never drained).
+	 */
+	syn_remote_serve_resume();
 	if (ota.cpu1_parked) {
 		ota.cpu1_parked = false;
 		int ret = syn_boot_secondary_resume(OTA_CPU1_RESUME_TIMEOUT_MS);
@@ -144,6 +150,19 @@ int syn_ota_begin(const char *model_name, size_t total_size)
 		k_mutex_unlock(&ota_lock);
 		return -EFBIG;
 	}
+
+#if defined(CONFIG_SYNAPTIC_DUAL_CORE) && !defined(CONFIG_SOC_MCXN947_CPU1)
+	/* Never park CPU1 mid-request: pause cross-core serving and
+	 * wait out the in-flight inference (response included). Refuse
+	 * the session rather than wedge a live exchange.
+	 */
+	if (syn_remote_serve_drain(OTA_SERVE_DRAIN_TIMEOUT_MS) != 0) {
+		syn_remote_serve_resume();
+		k_mutex_unlock(&ota_lock);
+		LOG_WRN("OTA begin refused: cross-core serve still busy");
+		return -EBUSY;
+	}
+#endif
 
 	/* a staged-but-unactivated predecessor is superseded */
 	if (syn_store_staged_slot() != SYN_STORE_SLOT_NONE) {

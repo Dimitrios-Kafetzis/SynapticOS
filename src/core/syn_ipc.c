@@ -109,6 +109,32 @@ static void syn_ipc_rx_thread(void *p1, void *p2, void *p3)
 	}
 }
 
+#if defined(CONFIG_SOC_MCXN947_CPU1)
+/* CPU1 liveness heartbeat (5.4): ticks a shared counter every
+ * 100 ms so CPU0's health monitor can detect a hung CPU1 and
+ * recover it by park + re-release. A CPU0-requested induced hang
+ * (SYN_SHM_DEBUG_CPU1_HANG in debug_cmd) spins with interrupts off
+ * inside this timer ISR - the core is then genuinely dead until
+ * CPU0 resets it, which exercises the real recovery path.
+ */
+static void cpu1_heartbeat_fn(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	if (shm == NULL) {
+		return;
+	}
+	if (shm->ctrl.debug_cmd == SYN_SHM_DEBUG_CPU1_HANG) {
+		(void)irq_lock();
+		while (1) {
+		}
+	}
+	shm->ctrl.cpu1_heartbeat++;
+}
+
+static K_TIMER_DEFINE(cpu1_heartbeat_timer, cpu1_heartbeat_fn, NULL);
+#endif /* CONFIG_SOC_MCXN947_CPU1 */
+
 int syn_ipc_init(void *shared_base, size_t shared_size)
 {
 	if (shared_base == NULL) {
@@ -180,6 +206,8 @@ int syn_ipc_init(void *shared_base, size_t shared_size)
 	/* Announce readiness for the boot handshake (3.3). */
 #if defined(CONFIG_SOC_MCXN947_CPU1)
 	shm->ctrl.cpu1_ready = 1;
+	/* Liveness heartbeat for CPU0's health monitor (5.4) */
+	k_timer_start(&cpu1_heartbeat_timer, K_MSEC(100), K_MSEC(100));
 #else
 	shm->ctrl.cpu0_ready = 1;
 #endif

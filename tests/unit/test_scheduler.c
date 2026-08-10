@@ -17,7 +17,9 @@
 
 #define SCHED_INPUT_SIZE 48
 
-static uint8_t sched_arena[4096] __aligned(16);
+#include "test_common.h"
+
+#define sched_arena test_shared_arena
 static const uint8_t sched_model_bin[32] = {0};
 static syn_model_handle_t sched_model;
 

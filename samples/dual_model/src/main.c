@@ -67,6 +67,301 @@ static int register_model(const char *name, uint32_t input_size,
 	return 0;
 }
 
+#if defined(CONFIG_SYNAPTIC_LAYER_EXEC) && defined(CONFIG_SYNAPTIC_SHELL)
+/* `demo preempt`: on-hardware demonstration of layer-boundary
+ * preemption (Phase 5.1/5.2). Loads a synthetic layered DAG model,
+ * runs an unpreempted baseline, then a NORMAL preemptible job that
+ * a REALTIME job preempts mid-execution; verifies the resumed
+ * output bit-exactly and reports timings. Cross-core serving is
+ * drained for the duration (CPU1 requests get -EAGAIN) because the
+ * NPU's resident model becomes the layered blob.
+ */
+#include <zephyr/shell/shell.h>
+#include "syn_npu_layered.h"
+#include "syn_infer_internal.h"
+
+#define DEMO_IN_SIZE   32
+#define DEMO_OUT_SIZE  10
+#define DEMO_LAYERS    8
+#define DEMO_WORK      2000  /* ~ms-scale per layer at 150 MHz */
+
+static uint8_t demo_blob[SYN_LAYERED_HDR_SIZE +
+			 DEMO_LAYERS * SYN_LAYERED_DDESC_SIZE];
+static int demo_blob_size;
+static syn_model_handle_t demo_model_handle;
+
+static uint8_t demo_in_a[DEMO_IN_SIZE];
+static uint8_t demo_in_b[DEMO_IN_SIZE];
+
+static volatile int demo_done_count;
+static uint32_t demo_done_order[4];
+static uint32_t demo_done_cyc[4];
+static uint32_t demo_rt_done_cyc;
+
+static void demo_cb(syn_job_id_t job, const syn_tensor_t *output,
+		    void *user_data)
+{
+	ARG_UNUSED(job);
+	ARG_UNUSED(output);
+
+	uint32_t tag = (uint32_t)(uintptr_t)user_data;
+
+	if (tag == 2U) {
+		demo_rt_done_cyc = k_cycle_get_32();
+	}
+	if (demo_done_count < 4) {
+		demo_done_order[demo_done_count] = tag;
+		demo_done_cyc[demo_done_count] = k_cycle_get_32();
+	}
+	demo_done_count++;
+}
+
+static int demo_ensure_model(const struct shell *sh)
+{
+	if (demo_blob_size == 0) {
+		/* Long skip: L4 also consumes L0's output, so the
+		 * planner must keep it alive across L1-L4.
+		 */
+		syn_layered_dag_layer_t layers[DEMO_LAYERS] = {
+			{ 64, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+			{ 64, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+			{ 48, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+			{ 48, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+			{ 48, DEMO_WORK, SYN_LAYERED_SRC_PREV, 0 },
+			{ 32, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+			{ 16, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+			{ DEMO_OUT_SIZE, DEMO_WORK, SYN_LAYERED_SRC_PREV,
+			  SYN_LAYERED_SRC_NONE },
+		};
+
+		demo_blob_size = syn_npu_layered_make_dag(
+			demo_blob, sizeof(demo_blob), DEMO_IN_SIZE,
+			DEMO_LAYERS, layers);
+		if (demo_blob_size <= 0) {
+			shell_error(sh, "make_dag failed: %d",
+				    demo_blob_size);
+			return -EINVAL;
+		}
+
+		syn_model_info_t info = {0};
+
+		strncpy(info.name, "layered_demo", sizeof(info.name) - 1);
+		strncpy(info.version, "5.1", sizeof(info.version) - 1);
+		info.input_size = DEMO_IN_SIZE;
+		info.output_size = DEMO_OUT_SIZE;
+		info.input_dtype = SYN_NPU_DTYPE_INT8;
+		info.output_dtype = SYN_NPU_DTYPE_INT8;
+
+		int ret = syn_model_register(&info, &demo_model_handle);
+
+		if (ret != 0) {
+			shell_error(sh, "register failed: %d", ret);
+			demo_blob_size = 0;
+			return ret;
+		}
+
+		for (int i = 0; i < DEMO_IN_SIZE; i++) {
+			demo_in_a[i] = (uint8_t)(i * 3 + 1);
+			demo_in_b[i] = (uint8_t)(0xA5 - i * 7);
+		}
+	}
+	return 0;
+}
+
+static int cmd_demo_preempt(const struct shell *sh, size_t argc,
+			    char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	int ret = demo_ensure_model(sh);
+
+	if (ret != 0) {
+		return ret;
+	}
+
+	/* The layered blob becomes the resident NPU model: pause
+	 * cross-core serving for the duration.
+	 */
+	ret = syn_remote_serve_drain(2000);
+	if (ret != 0) {
+		shell_error(sh, "serve drain failed: %d", ret);
+		syn_remote_serve_resume();
+		return ret;
+	}
+
+	/* The layered job computes on the scheduler thread without
+	 * ever blocking, so a lower-priority submitter would only get
+	 * the CPU back after the job completes and could never inject
+	 * the REALTIME job mid-run. Outrank the scheduler thread for
+	 * the demo (the QEMU tests do this implicitly: the ztest
+	 * thread is cooperative).
+	 */
+	int old_prio = k_thread_priority_get(k_current_get());
+
+	k_thread_priority_set(k_current_get(), K_PRIO_PREEMPT(2));
+
+	ret = syn_hal_npu_load_model(demo_blob, (size_t)demo_blob_size);
+	if (ret != 0) {
+		shell_error(sh, "layered blob load failed: %d", ret);
+		syn_remote_serve_resume();
+		return ret;
+	}
+
+	uint32_t in_shape[1] = { DEMO_IN_SIZE };
+	syn_tensor_t ta, tb;
+
+	syn_mem_tensor_init(&ta, in_shape, 1, SYN_NPU_DTYPE_INT8);
+	ta.data = demo_in_a;
+	ta.lifetime = SYN_MEM_SHARED;
+	syn_mem_tensor_init(&tb, in_shape, 1, SYN_NPU_DTYPE_INT8);
+	tb.data = demo_in_b;
+	tb.lifetime = SYN_MEM_SHARED;
+
+	/* Unpreempted baseline */
+	int8_t baseline[DEMO_OUT_SIZE];
+	syn_tensor_t base_out = { .data = baseline,
+				  .size = sizeof(baseline) };
+	uint32_t t0 = k_cycle_get_32();
+
+	ret = syn_infer_run_sync(demo_model_handle, &ta, &base_out,
+				 SYN_PRIORITY_NORMAL);
+
+	uint32_t base_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+
+	syn_mem_reset_ephemeral();
+	if (ret != 0) {
+		shell_error(sh, "baseline run failed: %d", ret);
+		goto restore;
+	}
+	shell_print(sh, "baseline: %u us for %u layers (stub NPU, "
+		    "synthetic model)", base_us, DEMO_LAYERS);
+
+	uint32_t planned, naive, plan_us;
+
+	syn_npu_layered_plan_info(&planned, &naive, &plan_us);
+	shell_print(sh, "plan: peak %u vs all-live %u bytes (-%u%%), "
+		    "planned in %u us", planned, naive,
+		    (unsigned)(100U - planned * 100U / naive), plan_us);
+
+	/* Preemption run */
+	syn_infer_stats_t st0, st1;
+
+	syn_infer_get_stats(&st0);
+	demo_done_count = 0;
+
+	syn_pipeline_t *pn = syn_pipeline_create("demo_n");
+	syn_pipeline_t *pr = syn_pipeline_create("demo_r");
+
+	if (pn == NULL || pr == NULL ||
+	    syn_pipeline_add_model(pn, demo_model_handle) != 0 ||
+	    syn_pipeline_add_model(pr, demo_model_handle) != 0 ||
+	    syn_pipeline_build(pn) != 0 || syn_pipeline_build(pr) != 0) {
+		shell_error(sh, "pipeline setup failed");
+		syn_pipeline_destroy(pn);
+		syn_pipeline_destroy(pr);
+		ret = -EIO;
+		goto restore;
+	}
+
+	syn_infer_params_t np = {
+		.priority = SYN_PRIORITY_NORMAL,
+		.preemptible = true,
+		.callback = demo_cb,
+		.user_data = (void *)1,
+	};
+	uint32_t n_submit_cyc = k_cycle_get_32();
+	syn_job_id_t jn = syn_infer_submit(pn, &ta, &np);
+
+	/* Land inside the NORMAL job (~8 layers x ~ms each) */
+	k_msleep(3);
+
+	syn_infer_params_t rp = {
+		.priority = SYN_PRIORITY_REALTIME,
+		.callback = demo_cb,
+		.user_data = (void *)2,
+	};
+	uint32_t rt_submit_cyc = k_cycle_get_32();
+	syn_job_id_t jr = syn_infer_submit(pr, &tb, &rp);
+
+	if (jn == SYN_JOB_INVALID || jr == SYN_JOB_INVALID) {
+		shell_error(sh, "submit failed");
+		syn_pipeline_destroy(pn);
+		syn_pipeline_destroy(pr);
+		ret = -EIO;
+		goto restore;
+	}
+
+	int wait_r = syn_infer_wait(jr, 5000);
+	int wait_n = syn_infer_wait(jn, 5000);
+
+	syn_tensor_t rn, rr;
+	int ret_n, ret_r;
+
+	ret_r = syn_infer_get_result(jr, &rr);
+	ret_n = syn_infer_get_result(jn, &rn);
+	syn_infer_get_stats(&st1);
+
+	shell_print(sh, "diag: jn=%u jr=%u wait n/r=%d/%d result n/r="
+		    "%d/%d cb_count=%d", jn, jr, wait_n, wait_r,
+		    ret_n, ret_r, demo_done_count);
+	for (int i = 0; i < demo_done_count && i < 4; i++) {
+		shell_print(sh, "diag: cb[%d] tag=%u at +%u us "
+			    "(from NORMAL submit)", i,
+			    demo_done_order[i],
+			    k_cyc_to_us_ceil32(demo_done_cyc[i] -
+					       n_submit_cyc));
+	}
+
+	uint32_t rt_latency_us = k_cyc_to_us_ceil32(demo_rt_done_cyc -
+						    rt_submit_cyc);
+	bool order_ok = (demo_done_count == 2 &&
+			 demo_done_order[0] == 2U);
+	bool exact = (ret_n == 0 && rn.size == DEMO_OUT_SIZE &&
+		      memcmp(rn.data, baseline, DEMO_OUT_SIZE) == 0);
+
+	shell_print(sh, "rt job: completed %s the normal job, "
+		    "%u us from submit to completion",
+		    order_ok ? "BEFORE" : "AFTER", rt_latency_us);
+	shell_print(sh, "normal job resumed: output %s the baseline",
+		    exact ? "MATCHES" : "DIFFERS FROM");
+	shell_print(sh, "preemptions +%u, resumes +%u, ctx save %u us "
+		    "(max %u us)", st1.preemptions - st0.preemptions,
+		    st1.resumes - st0.resumes, st1.last_save_us,
+		    st1.max_save_us);
+	shell_print(sh, "verdict: %s",
+		    (order_ok && exact &&
+		     st1.preemptions > st0.preemptions) ?
+		    "PASS" : "FAIL");
+
+	syn_pipeline_destroy(pn);
+	syn_pipeline_destroy(pr);
+	syn_mem_reset_ephemeral();
+	ret = (ret_r == 0 && order_ok && exact) ? 0 : -EIO;
+
+restore:
+	/* Put the stub blob back and reopen cross-core serving */
+	k_thread_priority_set(k_current_get(), old_prio);
+	(void)syn_hal_npu_load_model(dummy_model, sizeof(dummy_model));
+	syn_remote_serve_resume();
+	return ret;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_demo,
+	SHELL_CMD(preempt, NULL,
+		  "Layer-boundary preemption demo (drains CPU1 serving)",
+		  cmd_demo_preempt),
+	SHELL_SUBCMD_SET_END
+);
+SHELL_CMD_REGISTER(demo, &sub_demo, "dual_model demos", NULL);
+#endif /* CONFIG_SYNAPTIC_LAYER_EXEC && CONFIG_SYNAPTIC_SHELL */
+
 int main(void)
 {
 	int ret;
