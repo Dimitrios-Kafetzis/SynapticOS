@@ -65,11 +65,31 @@ static struct {
 	bool               hw_ok;       /* neutronInit succeeded */
 	bool               prepared;    /* hdl refers to a live model */
 	NeutronModelHandle hdl;
+	/* BOARD FINDING (Phase 6): the driver stores &mcfg in the model
+	 * handle and dereferences it again on every neutronRunBlocking
+	 * (handle[0]->microcode feeds the firmware interpreter). A
+	 * stack-local config therefore fails at run time with
+	 * Firmware/microcode code 134 once the prepare frame is gone -
+	 * the config must live as long as the prepared model.
+	 */
+	NeutronModelConfig mcfg;
 	uint32_t           input_size;  /* from the SYNN header */
 	uint32_t           output_size;
 	uint8_t            ctx[CONFIG_SYNAPTIC_NEUTRON_CTX_MAX] __aligned(16);
 	uint8_t            scratch[CONFIG_SYNAPTIC_NEUTRON_SCRATCH_SIZE] __aligned(16);
 } neutron;
+
+/* BOARD FINDING (Phase 6): like the eDMA (see syn_hal_dma_edma.c),
+ * the Neutron NPU masters its own bus transactions and cannot use
+ * CPU0's TrustZone secure aliases (bit 28): microcode fetched via a
+ * 0x10xxxxxx flash pointer reads as garbage and the firmware rejects
+ * it as "bad magic" (Firmware/microcode code 134). Every address
+ * handed to the driver must be the plain alias.
+ */
+static const void *npu_addr(const void *p)
+{
+	return (const void *)((uintptr_t)p & ~BIT(28));
+}
 
 static void neutron_log_error(const char *what, NeutronError e)
 {
@@ -144,17 +164,17 @@ static int neutron_prepare(const uint8_t *data, size_t size)
 		return rc;
 	}
 
-	const NeutronModelConfig mcfg = {
-		.microcode      = data + hdr->microcode_off,
-		.weights        = data + hdr->weights_off,
-		.kernels        = data + hdr->kernels_off,
+	neutron.mcfg = (NeutronModelConfig){
+		.microcode      = npu_addr(data + hdr->microcode_off),
+		.weights        = npu_addr(data + hdr->weights_off),
+		.kernels        = npu_addr(data + hdr->kernels_off),
 		.timeoutSeconds = 10,
 		.subgraphName   = NULL,
 	};
 
 	neutron.hdl = (NeutronModelHandle)neutron.ctx;
 
-	NeutronError e = neutronModelPrepare(&mcfg, &neutron.hdl);
+	NeutronError e = neutronModelPrepare(&neutron.mcfg, &neutron.hdl);
 
 	if (e != ENONE) {
 		neutron.hdl = NEUTRON_INVALID_HANDLE;
@@ -350,16 +370,35 @@ int syn_hal_npu_invoke(void)
 			return -EINVAL;
 		}
 
-		const void *inputs[1] = { npu.input_buf };
-		void *outputs[1] = { npu.output_buf };
+		/* BOARD FINDING (Phase 6): the firmware ABI indexes past
+		 * the declared data outputs - the converted graph's output
+		 * list is {data, scratch, profile, debug} and the driver
+		 * reads outputs[numOutputs] and outputs[numOutputs+1]
+		 * unconditionally. A 1-entry array therefore feeds stack
+		 * garbage to the firmware as write pointers, which sprays
+		 * inference data over the thread stacks (silent boot-time
+		 * crash, no fault dump). Slot 1 must be the scratch buffer;
+		 * the shape-0 profile/debug slots take NULL.
+		 */
+		const void *inputs[1] = { npu_addr(npu.input_buf) };
+		void *outputs[4] = {
+			(void *)npu_addr(npu.output_buf),
+			(void *)npu_addr(neutron.scratch),
+			NULL,
+			NULL,
+		};
 		NeutronDataConfig dcfg = {
 			.inputs         = inputs,
 			.outputs        = outputs,
-			.scratch        = neutron.scratch,
+			.scratch        = (void *)npu_addr(neutron.scratch),
 			.scratchWeights = NULL,
 		};
 
+		LOG_DBG("Neutron run: enter (ucode %p)", neutron.mcfg.microcode);
+
 		NeutronError e = neutronRunBlocking(neutron.hdl, &dcfg);
+
+		LOG_DBG("Neutron run: exit (%d)", (int)e);
 
 		if (e != ENONE) {
 			npu.state = SYN_NPU_STATE_ERROR;

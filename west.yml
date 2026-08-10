@@ -27,9 +27,12 @@ manifest:
           - segger
     - name: mcuxsdk-middleware-eiq
       remote: nxp-mcuxpresso
-      # Pinned to the first main-branch state carrying neutron/mcxn
-      # (release tags up to MCUX_2.16.100 predate the neutron folder).
-      revision: 33f40b6e0960696f9cd75f5f62787976b65f96b1
+      # Pinned to Neutron Software 3.0.0 (driver 3.0.0+0X6d41ac8b),
+      # the generation matching neutron-converter SDK_26_03 microcode.
+      # Later main states carry driver 3.1.1, which no released
+      # converter targets; release tags up to MCUX_2.16.100 predate
+      # the neutron folder entirely.
+      revision: 02be0f262ebe81d5c31fd2f3d5a6c22e3a837760
       path: modules/eiq
       groups:
         - neutron
