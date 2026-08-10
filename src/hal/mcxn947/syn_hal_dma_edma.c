@@ -309,4 +309,9 @@ int syn_hal_dma_get_remaining(int channel, size_t *remaining)
 	return -ENOSYS;
 }
 
+void syn_hal_dma_dump(int channel)
+{
+	ARG_UNUSED(channel);
+}
+
 #endif /* CONFIG_DMA && edma0 */
