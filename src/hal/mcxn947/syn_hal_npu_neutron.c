@@ -6,8 +6,10 @@
  * Hardware NPU driver for the NXP FRDM-MCXN947 eIQ Neutron NPU.
  *
  * Current implementation: Software-emulated stub with hardware-specific
- * initialization. Real Neutron SDK integration will be added when the
- * SDK becomes available in hal_nxp.
+ * initialization. With CONFIG_SYNAPTIC_NEUTRON (optional `neutron`
+ * west group providing NXP's eIQ Neutron driver library) the real
+ * invoke path replaces the stub; until that lands, enabling the
+ * option only links the driver library and keeps the stub behavior.
  */
 
 #include <zephyr/kernel.h>
@@ -17,11 +19,11 @@
 
 #include "../common/syn_npu_layered.h"
 
-LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+#include <NeutronDriver.h>
+#endif
 
-/* TODO: Replace with real Neutron SDK includes when available:
- * #include <neutron.h>
- */
+LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 /* Stub-inference bound: the HAL only keeps an XIP pointer, so accept
  * anything a flash model slot can hold (440 KB minus the .synm
@@ -67,6 +69,17 @@ int syn_hal_npu_init(void)
 
 	npu.state = SYN_NPU_STATE_IDLE;
 	npu.initialized = true;
+
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	/* Referencing the driver entry point keeps the LA_OPT archive in
+	 * the link, so ABI or symbol problems surface at build time; the
+	 * driver is not called until the invoke path lands.
+	 */
+	static NeutronError (*const neutron_entry)(void) = neutronInit;
+
+	LOG_INF("Neutron driver library linked (entry %p), invoke path pending",
+		(const void *)neutron_entry);
+#endif
 
 	LOG_INF("Neutron NPU initialized (stub — SDK not yet integrated)");
 	return 0;

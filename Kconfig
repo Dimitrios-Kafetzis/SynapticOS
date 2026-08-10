@@ -140,6 +140,23 @@ config SYNAPTIC_CPU1_HANG_MS
       counter stalls this long while the link is up, CPU0 parks and
       re-releases CPU1 (the OTA park/resume machinery).
 
+config SYNAPTIC_NEUTRON
+    bool "Use the eIQ Neutron NPU (requires the optional eIQ module)"
+    depends on SOC_SERIES_MCXNX4X && !SOC_MCXN947_CPU1
+    select FPU
+    help
+      Drive the eIQ Neutron NPU through NXP's precompiled
+      libNeutronDriver/libNeutronFirmware. Those libraries are
+      LA_OPT-licensed and are NOT part of this repository; enable the
+      optional west group and fetch them from NXP's public repository
+      first:
+        west config manifest.group-filter -- +neutron
+        west update mcuxsdk-middleware-eiq
+      Models must be compiled ahead of time with neutron-converter
+      (LiteRT/TFLite input). When disabled, the NPU HAL keeps the
+      stub passthrough behavior and the build is identical to a
+      pre-Neutron tree.
+
 config SYNAPTIC_POWERQUAD
     bool "Use PowerQuad hardware acceleration"
     depends on SOC_SERIES_MCXNX4X

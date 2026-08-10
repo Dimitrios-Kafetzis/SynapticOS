@@ -97,6 +97,28 @@ if(CONFIG_SOC_SERIES_MCXNX4X)
             ${ZEPHYR_HAL_NXP_MODULE_DIR}/mcux/mcux-sdk/drivers/edma4
             ${ZEPHYR_HAL_NXP_MODULE_DIR}/mcux/mcux-sdk/devices/MCXN947/drivers)
     endif()
+    if(CONFIG_SYNAPTIC_NEUTRON)
+        # Optional eIQ module (west group `neutron`): LA_OPT-licensed
+        # Neutron driver + NPU firmware, fetched from NXP's public
+        # repository into the workspace, never vendored here. The
+        # project is not a Zephyr module, so locate it relative to
+        # the workspace root (this repo sits directly under it).
+        get_filename_component(SYN_EIQ_DIR
+            ${CMAKE_CURRENT_SOURCE_DIR}/../modules/eiq ABSOLUTE)
+        if(NOT EXISTS ${SYN_EIQ_DIR}/neutron/mcxn/libNeutronDriver.a)
+            message(FATAL_ERROR
+                "CONFIG_SYNAPTIC_NEUTRON=y but the optional eIQ module "
+                "is missing (${SYN_EIQ_DIR}). Fetch it with: "
+                "west config manifest.group-filter -- +neutron && "
+                "west update mcuxsdk-middleware-eiq")
+        endif()
+        zephyr_library_include_directories(
+            ${SYN_EIQ_DIR}/neutron/driver/include
+            ${SYN_EIQ_DIR}/neutron/common/include)
+        zephyr_library_link_libraries(
+            ${SYN_EIQ_DIR}/neutron/mcxn/libNeutronDriver.a
+            ${SYN_EIQ_DIR}/neutron/mcxn/libNeutronFirmware.a)
+    endif()
     if(CONFIG_SYNAPTIC_POWERQUAD)
         # PowerQuad SDK driver has no Zephyr glue in this hal_nxp
         # revision; compile the needed engines directly.
