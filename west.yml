@@ -1,7 +1,18 @@
 manifest:
+  # The optional `neutron` group pulls NXP's eIQ middleware (Neutron
+  # NPU driver + firmware libraries). Those libraries are covered by
+  # NXP's LA_OPT license, NOT Apache-2.0, so they are never vendored
+  # into this repository; fetching them from NXP's public repository
+  # is an explicit user opt-in:
+  #   west config manifest.group-filter -- +neutron
+  #   west update mcuxsdk-middleware-eiq
+  group-filter: [-neutron]
+
   remotes:
     - name: zephyrproject-rtos
       url-base: https://github.com/zephyrproject-rtos
+    - name: nxp-mcuxpresso
+      url-base: https://github.com/nxp-mcuxpresso
 
   projects:
     - name: zephyr
@@ -14,6 +25,14 @@ manifest:
           - mcuboot
           - mbedtls
           - segger
+    - name: mcuxsdk-middleware-eiq
+      remote: nxp-mcuxpresso
+      # Pinned to the first main-branch state carrying neutron/mcxn
+      # (release tags up to MCUX_2.16.100 predate the neutron folder).
+      revision: 33f40b6e0960696f9cd75f5f62787976b65f96b1
+      path: modules/eiq
+      groups:
+        - neutron
 
   self:
     path: synaptic-os

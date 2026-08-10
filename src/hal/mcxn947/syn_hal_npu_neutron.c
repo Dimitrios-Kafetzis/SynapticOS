@@ -5,9 +5,12 @@
  *
  * Hardware NPU driver for the NXP FRDM-MCXN947 eIQ Neutron NPU.
  *
- * Current implementation: Software-emulated stub with hardware-specific
- * initialization. Real Neutron SDK integration will be added when the
- * SDK becomes available in hal_nxp.
+ * With CONFIG_SYNAPTIC_NEUTRON (optional `neutron` west group
+ * providing NXP's eIQ Neutron driver library) models carrying the
+ * interim "SYNN" blob header run on the NPU through
+ * neutronRunBlocking; anything else (and every build without the
+ * option) keeps the software-emulated stub path, including the
+ * synthetic layered format.
  */
 
 #include <zephyr/kernel.h>
@@ -17,11 +20,13 @@
 
 #include "../common/syn_npu_layered.h"
 
-LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+#include <NeutronDriver.h>
+#include <fsl_clock.h>
+#include <fsl_reset.h>
+#endif
 
-/* TODO: Replace with real Neutron SDK includes when available:
- * #include <neutron.h>
- */
+LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 /* Stub-inference bound: the HAL only keeps an XIP pointer, so accept
  * anything a flash model slot can hold (440 KB minus the .synm
@@ -32,6 +37,141 @@ LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
 #define NEUTRON_MAX_MODEL_SIZE    (440 * 1024 - 64)
 #define NEUTRON_MAX_INPUT_SIZE    (96 * 96 * 3)
 #define NEUTRON_MAX_OUTPUT_SIZE   256
+
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+/* Interim Neutron blob format ("SYNN", little-endian), single
+ * input / single output. neutron-converter emits a microcode /
+ * weights / kernels triple; the packer concatenates them behind
+ * this header with every section 16-byte aligned relative to the
+ * blob start (the store hands out 16-byte-aligned XIP pointers, so
+ * relative alignment is enough). The proper .synm container mapping
+ * replaces this in 6.1c.
+ */
+#define SYN_NEUTRON_MAGIC 0x4E4E5953UL /* "SYNN" */
+
+struct syn_neutron_hdr {
+	uint32_t magic;
+	uint32_t microcode_off;
+	uint32_t microcode_size;
+	uint32_t weights_off;
+	uint32_t weights_size;
+	uint32_t kernels_off;
+	uint32_t kernels_size;
+	uint32_t input_size;
+	uint32_t output_size;
+};
+
+static struct {
+	bool               hw_ok;       /* neutronInit succeeded */
+	bool               prepared;    /* hdl refers to a live model */
+	NeutronModelHandle hdl;
+	uint32_t           input_size;  /* from the SYNN header */
+	uint32_t           output_size;
+	uint8_t            ctx[CONFIG_SYNAPTIC_NEUTRON_CTX_MAX] __aligned(16);
+	uint8_t            scratch[CONFIG_SYNAPTIC_NEUTRON_SCRATCH_SIZE] __aligned(16);
+} neutron;
+
+static void neutron_log_error(const char *what, NeutronError e)
+{
+	LOG_ERR("%s: %s/%s code %ld", what,
+		getNeutronErrorComponent(e), getNeutronErrorCategory(e),
+		(long)GET_ERROR_CODE(e));
+}
+
+static int neutron_unprepare(void)
+{
+	if (!neutron.prepared) {
+		return 0;
+	}
+
+	NeutronError e = neutronModelUnprepare(neutron.hdl);
+
+	neutron.prepared = false;
+	neutron.hdl = NEUTRON_INVALID_HANDLE;
+	if (e != ENONE) {
+		neutron_log_error("neutronModelUnprepare", e);
+		return -EIO;
+	}
+	return 0;
+}
+
+/* Returns 0 when the blob is a valid SYNN model and it was prepared
+ * on the NPU, -ENOTSUP when the blob is not a SYNN model (caller
+ * keeps the stub path), a negative errno otherwise.
+ */
+static int neutron_prepare(const uint8_t *data, size_t size)
+{
+	const struct syn_neutron_hdr *hdr = (const void *)data;
+
+	if (size < sizeof(*hdr) || hdr->magic != SYN_NEUTRON_MAGIC) {
+		return -ENOTSUP;
+	}
+	if (!neutron.hw_ok) {
+		LOG_ERR("SYNN model but the NPU is unavailable");
+		return -ENODEV;
+	}
+	if ((uint64_t)hdr->microcode_off + hdr->microcode_size > size ||
+	    (uint64_t)hdr->weights_off + hdr->weights_size > size ||
+	    (uint64_t)hdr->kernels_off + hdr->kernels_size > size) {
+		LOG_ERR("SYNN section out of bounds (blob %zu B)", size);
+		return -EINVAL;
+	}
+	if ((hdr->microcode_off | hdr->weights_off | hdr->kernels_off) & 0xF) {
+		LOG_ERR("SYNN section misaligned (16-byte required)");
+		return -EINVAL;
+	}
+	if (hdr->input_size == 0 ||
+	    hdr->input_size > NEUTRON_MAX_INPUT_SIZE ||
+	    hdr->output_size == 0 ||
+	    hdr->output_size > NEUTRON_MAX_OUTPUT_SIZE) {
+		LOG_ERR("SYNN i/o sizes unsupported (%u/%u)",
+			hdr->input_size, hdr->output_size);
+		return -EINVAL;
+	}
+
+	size_t ctx_need = neutronGetModelContextSize();
+
+	if (ctx_need > sizeof(neutron.ctx)) {
+		LOG_ERR("Neutron context needs %zu B, buffer is %zu B "
+			"(raise SYNAPTIC_NEUTRON_CTX_MAX)",
+			ctx_need, sizeof(neutron.ctx));
+		return -ENOMEM;
+	}
+
+	int rc = neutron_unprepare();
+
+	if (rc != 0) {
+		return rc;
+	}
+
+	const NeutronModelConfig mcfg = {
+		.microcode      = data + hdr->microcode_off,
+		.weights        = data + hdr->weights_off,
+		.kernels        = data + hdr->kernels_off,
+		.timeoutSeconds = 10,
+		.subgraphName   = NULL,
+	};
+
+	neutron.hdl = (NeutronModelHandle)neutron.ctx;
+
+	NeutronError e = neutronModelPrepare(&mcfg, &neutron.hdl);
+
+	if (e != ENONE) {
+		neutron.hdl = NEUTRON_INVALID_HANDLE;
+		neutron_log_error("neutronModelPrepare", e);
+		return -EIO;
+	}
+
+	neutron.prepared = true;
+	neutron.input_size = hdr->input_size;
+	neutron.output_size = hdr->output_size;
+	LOG_INF("Neutron model prepared: ucode %u B, weights %u B, "
+		"kernels %u B, io %u/%u B, ctx %zu B",
+		hdr->microcode_size, hdr->weights_size, hdr->kernels_size,
+		hdr->input_size, hdr->output_size, ctx_need);
+	return 0;
+}
+#endif /* CONFIG_SYNAPTIC_NEUTRON */
 
 static struct {
 	syn_npu_state_t state;
@@ -53,28 +193,49 @@ int syn_hal_npu_init(void)
 
 	memset(&npu, 0, sizeof(npu));
 
-	/* TODO: Enable NPU clock gate via Zephyr clock control or SYSCON:
-	 *   clock_control_on(...)
-	 * or:
-	 *   SYSCON->AHBCLKCTRL2 |= SYSCON_AHBCLKCTRL2_NPU_MASK;
-	 */
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	memset(&neutron, 0, sizeof(neutron));
+	CLOCK_EnableClock(kCLOCK_Neutron);
+	RESET_ClearPeripheralReset(kNEUTRON_RST_SHIFT_RSTn);
 
-	/* TODO: Configure NPU power domain if needed */
+	NeutronError e = neutronInit();
 
-	/* TODO: Initialize Neutron SDK:
-	 *   neutron_init(&npu_config);
-	 */
+	if (e == ENONE) {
+		neutron.hw_ok = true;
+		LOG_INF("Neutron NPU online (driver initialized)");
+	} else {
+		/* Same policy as the PowerQuad HAL: a failed bring-up
+		 * degrades to the software path instead of taking the
+		 * whole runtime down. SYNN models are rejected at load.
+		 */
+		CLOCK_DisableClock(kCLOCK_Neutron);
+		neutron_log_error("neutronInit", e);
+		LOG_WRN("Neutron unavailable, stub inference only");
+	}
+#endif
 
 	npu.state = SYN_NPU_STATE_IDLE;
 	npu.initialized = true;
 
-	LOG_INF("Neutron NPU initialized (stub — SDK not yet integrated)");
+	LOG_INF("Neutron NPU HAL initialized");
 	return 0;
 }
 
 void syn_hal_npu_deinit(void)
 {
-	/* TODO: Deinitialize Neutron SDK and disable clock gate */
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	if (neutron.hw_ok) {
+		(void)neutron_unprepare();
+
+		NeutronError e = neutronDeinit();
+
+		if (e != ENONE) {
+			neutron_log_error("neutronDeinit", e);
+		}
+		CLOCK_DisableClock(kCLOCK_Neutron);
+		neutron.hw_ok = false;
+	}
+#endif
 
 	npu.initialized = false;
 	npu.state = SYN_NPU_STATE_IDLE;
@@ -118,9 +279,24 @@ int syn_hal_npu_load_model(const uint8_t *model_data, size_t model_size)
 		return -ENOMEM;
 	}
 
-	/* TODO: Load model via Neutron SDK:
-	 *   neutron_load_model(model_data, model_size);
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	int rc = neutron_prepare(model_data, model_size);
+
+	if (rc == 0) {
+		npu.model_data = model_data;
+		npu.model_size = model_size;
+		npu.model_loaded = true;
+		return 0;
+	}
+	if (rc != -ENOTSUP) {
+		return rc;
+	}
+	/* Not a SYNN blob: a previously prepared Neutron model no
+	 * longer matches the loaded one; drop it and use the stub path.
 	 */
+	(void)neutron_unprepare();
+#endif
+
 	npu.model_data = model_data;
 	npu.model_size = model_size;
 	npu.model_loaded = true;
@@ -165,13 +341,39 @@ int syn_hal_npu_invoke(void)
 
 	npu.state = SYN_NPU_STATE_BUSY;
 
-	/* TODO: Replace with real Neutron SDK invoke:
-	 *   int ret = neutron_invoke();
-	 *   if (ret != 0) {
-	 *       npu.state = SYN_NPU_STATE_ERROR;
-	 *       return -EIO;
-	 *   }
-	 */
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	if (neutron.prepared) {
+		if (npu.input_size != neutron.input_size) {
+			npu.state = SYN_NPU_STATE_IDLE;
+			LOG_ERR("Input is %zu B, model expects %u B",
+				npu.input_size, neutron.input_size);
+			return -EINVAL;
+		}
+
+		const void *inputs[1] = { npu.input_buf };
+		void *outputs[1] = { npu.output_buf };
+		NeutronDataConfig dcfg = {
+			.inputs         = inputs,
+			.outputs        = outputs,
+			.scratch        = neutron.scratch,
+			.scratchWeights = NULL,
+		};
+
+		NeutronError e = neutronRunBlocking(neutron.hdl, &dcfg);
+
+		if (e != ENONE) {
+			npu.state = SYN_NPU_STATE_ERROR;
+			neutron_log_error("neutronRunBlocking", e);
+			return -EIO;
+		}
+
+		npu.output_size = neutron.output_size;
+		npu.state = SYN_NPU_STATE_IDLE;
+		LOG_DBG("Neutron inference complete (%u B out)",
+			neutron.output_size);
+		return 0;
+	}
+#endif
 
 	/* Stub inference: deterministic 10-class classification */
 	npu.output_size = 10;
@@ -232,7 +434,17 @@ int syn_hal_npu_suspend(void)
 		return -EPERM;
 	}
 
-	/* TODO: Gate NPU clock for power savings */
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	if (neutron.hw_ok) {
+		NeutronError e = neutronSuspend();
+
+		if (e != ENONE) {
+			neutron_log_error("neutronSuspend", e);
+			return -EIO;
+		}
+	}
+#endif
+
 	npu.state = SYN_NPU_STATE_SUSPENDED;
 	LOG_DBG("Neutron NPU suspended");
 	return 0;
@@ -247,7 +459,17 @@ int syn_hal_npu_resume(void)
 		return -EINVAL;
 	}
 
-	/* TODO: Ungate NPU clock */
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	if (neutron.hw_ok) {
+		NeutronError e = neutronResume();
+
+		if (e != ENONE) {
+			neutron_log_error("neutronResume", e);
+			return -EIO;
+		}
+	}
+#endif
+
 	npu.state = SYN_NPU_STATE_IDLE;
 	LOG_DBG("Neutron NPU resumed");
 	return 0;
