@@ -19,6 +19,7 @@ target_sources(app PRIVATE
     test_dma_ingest.c
     test_prof.c
     test_npu_hal.c
+    test_synn.c
     test_dsp_hal.c
     test_dsp_verify.c
     test_dsp_fft.c

@@ -38,6 +38,7 @@ zephyr_library_sources(
     src/core/syn_mem.c
     src/core/syn_model.c
     src/core/syn_prof.c
+    src/core/syn_synn.c
 )
 
 zephyr_library_sources_ifdef(CONFIG_SYNAPTIC

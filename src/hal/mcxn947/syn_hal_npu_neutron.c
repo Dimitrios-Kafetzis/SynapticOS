@@ -7,7 +7,8 @@
  *
  * With CONFIG_SYNAPTIC_NEUTRON (optional `neutron` west group
  * providing NXP's eIQ Neutron driver library) models carrying the
- * interim "SYNN" blob header run on the NPU through
+ * "SYNN" payload header (src/core/syn_synn.h, packed by
+ * tools/syn_model_pack.py) run on the NPU through
  * neutronRunBlocking; anything else (and every build without the
  * option) keeps the software-emulated stub path, including the
  * synthetic layered format.
@@ -19,6 +20,7 @@
 #include <string.h>
 
 #include "../common/syn_npu_layered.h"
+#include "syn_synn.h"
 
 #ifdef CONFIG_SYNAPTIC_NEUTRON
 #include <NeutronDriver.h>
@@ -39,28 +41,6 @@ LOG_MODULE_REGISTER(syn_hal_npu_neutron, CONFIG_SYNAPTIC_LOG_LEVEL);
 #define NEUTRON_MAX_OUTPUT_SIZE   256
 
 #ifdef CONFIG_SYNAPTIC_NEUTRON
-/* Interim Neutron blob format ("SYNN", little-endian), single
- * input / single output. neutron-converter emits a microcode /
- * weights / kernels triple; the packer concatenates them behind
- * this header with every section 16-byte aligned relative to the
- * blob start (the store hands out 16-byte-aligned XIP pointers, so
- * relative alignment is enough). The proper .synm container mapping
- * replaces this in 6.1c.
- */
-#define SYN_NEUTRON_MAGIC 0x4E4E5953UL /* "SYNN" */
-
-struct syn_neutron_hdr {
-	uint32_t magic;
-	uint32_t microcode_off;
-	uint32_t microcode_size;
-	uint32_t weights_off;
-	uint32_t weights_size;
-	uint32_t kernels_off;
-	uint32_t kernels_size;
-	uint32_t input_size;
-	uint32_t output_size;
-};
-
 static struct {
 	bool               hw_ok;       /* neutronInit succeeded */
 	bool               prepared;    /* hdl refers to a live model */
@@ -121,32 +101,27 @@ static int neutron_unprepare(void)
  */
 static int neutron_prepare(const uint8_t *data, size_t size)
 {
-	const struct syn_neutron_hdr *hdr = (const void *)data;
+	struct syn_synn_desc desc;
+	int rc = syn_synn_parse(data, size, &desc);
 
-	if (size < sizeof(*hdr) || hdr->magic != SYN_NEUTRON_MAGIC) {
-		return -ENOTSUP;
+	if (rc != 0) {
+		return rc;
 	}
 	if (!neutron.hw_ok) {
 		LOG_ERR("SYNN model but the NPU is unavailable");
 		return -ENODEV;
 	}
-	if ((uint64_t)hdr->microcode_off + hdr->microcode_size > size ||
-	    (uint64_t)hdr->weights_off + hdr->weights_size > size ||
-	    (uint64_t)hdr->kernels_off + hdr->kernels_size > size) {
-		LOG_ERR("SYNN section out of bounds (blob %zu B)", size);
-		return -EINVAL;
-	}
-	if ((hdr->microcode_off | hdr->weights_off | hdr->kernels_off) & 0xF) {
-		LOG_ERR("SYNN section misaligned (16-byte required)");
-		return -EINVAL;
-	}
-	if (hdr->input_size == 0 ||
-	    hdr->input_size > NEUTRON_MAX_INPUT_SIZE ||
-	    hdr->output_size == 0 ||
-	    hdr->output_size > NEUTRON_MAX_OUTPUT_SIZE) {
+	if (desc.input_size > NEUTRON_MAX_INPUT_SIZE ||
+	    desc.output_size > NEUTRON_MAX_OUTPUT_SIZE) {
 		LOG_ERR("SYNN i/o sizes unsupported (%u/%u)",
-			hdr->input_size, hdr->output_size);
+			desc.input_size, desc.output_size);
 		return -EINVAL;
+	}
+	if (desc.scratch_size > sizeof(neutron.scratch)) {
+		LOG_ERR("Neutron scratch needs %u B, buffer is %zu B "
+			"(raise SYNAPTIC_NEUTRON_SCRATCH_SIZE)",
+			desc.scratch_size, sizeof(neutron.scratch));
+		return -ENOMEM;
 	}
 
 	size_t ctx_need = neutronGetModelContextSize();
@@ -158,16 +133,16 @@ static int neutron_prepare(const uint8_t *data, size_t size)
 		return -ENOMEM;
 	}
 
-	int rc = neutron_unprepare();
+	rc = neutron_unprepare();
 
 	if (rc != 0) {
 		return rc;
 	}
 
 	neutron.mcfg = (NeutronModelConfig){
-		.microcode      = npu_addr(data + hdr->microcode_off),
-		.weights        = npu_addr(data + hdr->weights_off),
-		.kernels        = npu_addr(data + hdr->kernels_off),
+		.microcode      = npu_addr(desc.microcode),
+		.weights        = npu_addr(desc.weights),
+		.kernels        = npu_addr(desc.kernels),
 		.timeoutSeconds = 10,
 		.subgraphName   = NULL,
 	};
@@ -183,12 +158,13 @@ static int neutron_prepare(const uint8_t *data, size_t size)
 	}
 
 	neutron.prepared = true;
-	neutron.input_size = hdr->input_size;
-	neutron.output_size = hdr->output_size;
+	neutron.input_size = desc.input_size;
+	neutron.output_size = desc.output_size;
 	LOG_INF("Neutron model prepared: ucode %u B, weights %u B, "
-		"kernels %u B, io %u/%u B, ctx %zu B",
-		hdr->microcode_size, hdr->weights_size, hdr->kernels_size,
-		hdr->input_size, hdr->output_size, ctx_need);
+		"kernels %u B, io %u/%u B, scratch %u B, ctx %zu B",
+		desc.microcode_size, desc.weights_size, desc.kernels_size,
+		desc.input_size, desc.output_size, desc.scratch_size,
+		ctx_need);
 	return 0;
 }
 #endif /* CONFIG_SYNAPTIC_NEUTRON */
