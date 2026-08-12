@@ -39,6 +39,7 @@
 #include <string.h>
 
 #include <synaptic/syn_api.h>
+#include <synaptic/syn_mem.h>
 #include <synaptic/syn_model.h>
 #include <synaptic/syn_infer.h>
 #include <synaptic/syn_model_ota.h>
@@ -64,6 +65,7 @@ static const syn_store_layout_t qemu_layout = {
 	.registry_size = QSECTOR,
 	.slot_off = { 2U * QSECTOR, 2U * QSECTOR + QSLOT },
 	.slot_size = QSLOT,
+	.slot_count = 2U,
 };
 #endif
 
@@ -169,11 +171,8 @@ int main(void)
 		return -ENODEV;
 	}
 
-	static uint8_t in_buf[64];
 	static uint8_t out_buf[64];
 	uint32_t tick = 0;
-
-	memset(in_buf, 0x42, sizeof(in_buf));
 
 	LOG_INF("Inference tick every %u s; update via "
 		"tools/syn_ota_send.py, revert via 'syn ota rollback'",
@@ -192,19 +191,31 @@ int main(void)
 			continue;
 		}
 
-		syn_tensor_t in = {
-			.data = in_buf,
-			.size = MIN(info.input_size, sizeof(in_buf)),
-			.ndim = 1,
-		};
-		in.shape[0] = in.size;
+		/* Ephemeral input sized to whatever model is active -
+		 * an OTA can swap in a model with a different input
+		 * size mid-run (S5 board finding: a fixed small buffer
+		 * is rejected by the Neutron HAL's size gate)
+		 */
+		uint32_t shape[1] = { info.input_size };
+		syn_tensor_t *in = syn_mem_tensor_alloc(shape, 1,
+							info.input_dtype,
+							SYN_MEM_EPHEMERAL);
+
+		if (in == NULL) {
+			LOG_WRN("tick %u: arena too small for %u-byte input",
+				tick, info.input_size);
+			k_sleep(K_SECONDS(TICK_SECONDS));
+			tick++;
+			continue;
+		}
+		memset(in->data, 0x42, in->size);
 
 		syn_tensor_t out = {
 			.data = out_buf,
 			.size = sizeof(out_buf),
 		};
 
-		ret = syn_infer_run_sync(h, &in, &out, SYN_PRIORITY_NORMAL);
+		ret = syn_infer_run_sync(h, in, &out, SYN_PRIORITY_NORMAL);
 		if (ret == 0) {
 			LOG_INF("tick %u: served by '%s' (%s) slot %u, "
 				"%u output bytes",
