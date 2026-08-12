@@ -496,11 +496,18 @@ static const char *priority_name(syn_priority_t prio)
 /* eDMA bring-up diagnostics (board-only, defined in the eDMA HAL) */
 void syn_hal_dma_dump(int channel);
 
-/* Shared by `syn dma probe` and `syn dma bench`: the eDMA cannot
- * reach the tensor arena region (its non-secure bus transactions
- * fault on that RAM's security attributes, and with no-error-irq the
- * failure is a silent timeout - board finding). Static buffers in
- * the main RAM region are DMA-reachable.
+/* Shared by `syn dma probe` and `syn dma bench`. The Phase 5 "eDMA
+ * cannot reach the tensor arena" finding did NOT survive the Phase 6
+ * reachability experiments (`syn dma arena`, S5): with the P5 eDMA
+ * fixes in place (software START, no aborts between one-shots) the
+ * arena is reachable at every tested address, and the AHBSC boots
+ * with secure checking disabled. Latent constraint to remember: RAM
+ * block RAMC0 0x20010000-0x20017FFF boots with a secure-only MPC
+ * rule, which starts mattering (silently, for non-secure-attributed
+ * eDMA transactions) if secure checking is ever enabled; CH_SBR SEC
+ * per channel is the proven fix. The bench keeps using statics only
+ * so its numbers stay comparable across phases; moving the ingest
+ * path onto arena tensors is the 6.2 follow-up.
  */
 static uint8_t dma_buf_src[8192] __aligned(4);
 static uint8_t dma_buf_a[8192] __aligned(4);
@@ -1409,6 +1416,21 @@ static int cmd_dma_probe(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_SOC_SERIES_MCXNX4X */
 
+#ifdef CONFIG_SYNAPTIC_DMA_ARENA_PROBE
+/* Phase 6.3 bench diagnostics, defined in the eDMA HAL */
+int syn_dma_arena_probe(void);
+
+static int cmd_dma_arena(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Arena eDMA experiments (output via printk; "
+		    "resets the ephemeral arena)");
+	return syn_dma_arena_probe();
+}
+#endif /* CONFIG_SYNAPTIC_DMA_ARENA_PROBE */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_dma,
 	SHELL_CMD_ARG(bench, NULL,
 		      "Zero-copy ingest vs CPU copy: syn dma bench "
@@ -1416,6 +1438,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_dma,
 #ifdef CONFIG_SOC_SERIES_MCXNX4X
 	SHELL_CMD(probe, NULL, "eDMA bring-up probe: 3 transfers + regs",
 		  cmd_dma_probe),
+#endif
+#ifdef CONFIG_SYNAPTIC_DMA_ARENA_PROBE
+	SHELL_CMD(arena, NULL,
+		  "Arena eDMA reachability experiments (canary+timeout)",
+		  cmd_dma_arena),
 #endif
 	SHELL_SUBCMD_SET_END
 );

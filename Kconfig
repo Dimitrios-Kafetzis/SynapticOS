@@ -276,6 +276,21 @@ config SYNAPTIC_SHELL
       Add shell commands for model management, profiling,
       and runtime inspection.
 
+config SYNAPTIC_DMA_ARENA_PROBE
+    bool "Arena eDMA reachability probe (bench diagnostics)"
+    depends on SOC_SERIES_MCXNX4X && DMA && SYNAPTIC_SHELL
+    default n
+    help
+      Add 'syn dma arena', a canary-plus-timeout experiment harness
+      that probes whether the tensor arena is reachable by eDMA
+      transfers under different bus security attributes (per-channel
+      CH_SBR security bit, AHBSC master security level, MPC memory
+      rules). The SoC fails ineligible eDMA transfers silently, so
+      every attempt is verified against destination canary bytes
+      with a bounded wait and the AHBSC violation capture is dumped.
+      Board bring-up diagnostics only; keep disabled in production
+      builds.
+
 config SYNAPTIC_LOG_LEVEL
     int "SynapticOS log level"
     default 3
