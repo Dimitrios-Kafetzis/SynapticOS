@@ -41,6 +41,7 @@ static const syn_store_layout_t lay = {
     .registry_size = OSECTOR,
     .slot_off = { 2U * OSECTOR, 2U * OSECTOR + OSLOT },
     .slot_size = OSLOT,
+    .slot_count = 2U,
 };
 
 /* synthesized .synm image: header + payload */

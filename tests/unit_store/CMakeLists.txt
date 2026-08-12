@@ -8,6 +8,7 @@ project(synaptic_store_tests)
 # suites in QEMU's 64 KB.
 target_sources(app PRIVATE
     test_model_store.c
+    test_model_store_multi.c
     test_model_ota.c
     test_model_swap.c
 )

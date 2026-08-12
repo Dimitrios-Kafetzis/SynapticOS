@@ -916,6 +916,26 @@ void syn_infer_release(void)
 	}
 }
 
+bool syn_infer_model_suspended(syn_model_handle_t model)
+{
+	bool found = false;
+
+	if (model == SYN_MODEL_INVALID) {
+		return false;
+	}
+
+	k_mutex_lock(&infer_lock, K_FOREVER);
+	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
+		if (jobs[i].state == JOB_SUSPENDED &&
+		    jobs[i].pipe != NULL && jobs[i].pipe->model == model) {
+			found = true;
+			break;
+		}
+	}
+	k_mutex_unlock(&infer_lock);
+	return found;
+}
+
 syn_job_id_t syn_infer_submit(syn_pipeline_t *pipe,
 			      const syn_tensor_t *input,
 			      const syn_infer_params_t *params)

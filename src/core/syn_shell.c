@@ -1003,26 +1003,62 @@ static int cmd_store_status(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 
-	shell_print(sh, "generation %u  active slot %u  staged slot %u",
-		    syn_store_generation(), syn_store_active_slot(),
-		    syn_store_staged_slot());
+	shell_print(sh, "generation %u  active slot %u  staged slot %u  "
+		    "prev slot %u", syn_store_generation(),
+		    syn_store_active_slot(), syn_store_staged_slot(),
+		    syn_store_prev_active_slot());
 	shell_print(sh, "registry wear: copy0 %u copy1 %u erases",
 		    syn_store_wear(0), syn_store_wear(1));
 	shell_print(sh, "last commit %u us, boot scan %u us",
 		    syn_store_last_commit_us(), syn_store_scan_us());
 
-	for (uint8_t s = 0; s < 2U; s++) {
+	for (uint8_t s = 0; s < syn_store_slot_count(); s++) {
 		syn_model_info_t info;
 
 		if (syn_store_slot_info(s, &info) == 0) {
+			syn_model_handle_t h;
+			bool resident =
+				(syn_model_get_by_name(info.name, &h) == 0);
+
 			shell_print(sh, "slot %u: '%s' %u bytes crc 0x%08x "
-				    "at 0x%08x", s, info.name,
+				    "at 0x%08x%s", s, info.name,
 				    info.flash_size, info.crc32,
-				    info.flash_offset);
+				    info.flash_offset,
+				    resident ? " (resident)" : "");
 		} else {
 			shell_print(sh, "slot %u: empty", s);
 		}
 	}
+	return 0;
+}
+
+/* syn store activate <slot> - hot-swap the active model by slot ID */
+static int cmd_store_activate(const struct shell *sh, size_t argc,
+			      char **argv)
+{
+	if (argc < 2) {
+		shell_error(sh, "Usage: syn store activate <slot>");
+		return -EINVAL;
+	}
+	if (!syn_store_ready()) {
+		shell_error(sh, "model store not initialized");
+		return -ENODEV;
+	}
+
+	uint8_t slot = (uint8_t)strtoul(argv[1], NULL, 0);
+	int ret = syn_store_activate(slot);
+
+	if (ret == -EALREADY) {
+		shell_print(sh, "slot %u is already active", slot);
+		return 0;
+	}
+	if (ret != 0) {
+		shell_error(sh, "activate slot %u failed: %d", slot, ret);
+		return ret;
+	}
+	shell_print(sh, "slot %u active (gen %u); previous slot %u stays "
+		    "resident", slot, syn_store_generation(),
+		    syn_store_prev_active_slot());
 	return 0;
 }
 
@@ -1506,6 +1542,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ipc,
 #ifdef CONFIG_SYNAPTIC_OTA
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_store,
 	SHELL_CMD(status, NULL, "Show model store state", cmd_store_status),
+	SHELL_CMD_ARG(activate, NULL,
+		      "Hot-swap the active model: syn store activate <slot>",
+		      cmd_store_activate, 2, 0),
 	SHELL_SUBCMD_SET_END
 );
 

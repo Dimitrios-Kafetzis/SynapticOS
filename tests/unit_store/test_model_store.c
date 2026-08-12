@@ -47,6 +47,7 @@ static const syn_store_layout_t lay = {
     .registry_size = TSECTOR,
     .slot_off = { 2U * TSECTOR, 2U * TSECTOR + TSLOT },
     .slot_size = TSLOT,
+    .slot_count = 2U,
 };
 
 static uint8_t payload[1200];
