@@ -558,10 +558,20 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 {
 	uint32_t frames = (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 0)
 				      : 64U;
+	bool use_static = false;
 
 	if (frames == 0U) {
 		shell_error(sh, "frames must be > 0");
 		return -EINVAL;
+	}
+	if (argc >= 3) {
+		if (strcmp(argv[2], "static") == 0) {
+			use_static = true;
+		} else if (strcmp(argv[2], "arena") != 0) {
+			shell_error(sh, "Bad buffer mode '%s' (use arena "
+				    "or static)", argv[2]);
+			return -EINVAL;
+		}
 	}
 
 	int ret = syn_hal_dma_init();
@@ -571,41 +581,59 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-#ifdef CONFIG_SOC_SERIES_MCXNX4X
-	/* Arena RAM is not eDMA-reachable (see the board finding at the
-	 * shared buffers above): bench from DMA-reachable statics.
+	/* Default: genuine zero-copy into arena tensors - the arena IS
+	 * eDMA-reachable (the Phase 6 `syn dma arena` experiments
+	 * revised the Phase 5 finding). The `static` mode keeps the
+	 * board-static variant for cross-phase comparability.
 	 */
-	uint8_t *src = dma_buf_src;
-	uint8_t *dst0 = dma_buf_a;
-	uint8_t *dst1 = dma_buf_b;
+	uint8_t *src = NULL;
+	uint8_t *dst0 = NULL;
+	uint8_t *dst1 = NULL;
+	bool arena_bufs = false;
+
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+	if (use_static) {
+		src = dma_buf_src;
+		dst0 = dma_buf_a;
+		dst1 = dma_buf_b;
+	}
 #else
-	uint8_t *src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
+	if (use_static) {
+		shell_error(sh, "static buffers exist only on the MCXN "
+			    "build");
+		return -EINVAL;
+	}
+#endif
 
 	if (src == NULL) {
-		shell_error(sh, "scratch pool too small for a %u-byte "
-			    "frame", DMA_BENCH_FRAME);
-		return -ENOMEM;
+		src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
+
+		if (src == NULL) {
+			shell_error(sh, "scratch pool too small for a "
+				    "%u-byte frame", DMA_BENCH_FRAME);
+			return -ENOMEM;
+		}
+
+		uint32_t shape[1] = { DMA_BENCH_FRAME };
+		syn_tensor_t *b0 = syn_mem_tensor_alloc(shape, 1,
+							SYN_NPU_DTYPE_UINT8,
+							SYN_MEM_EPHEMERAL);
+		syn_tensor_t *b1 = syn_mem_tensor_alloc(shape, 1,
+							SYN_NPU_DTYPE_UINT8,
+							SYN_MEM_EPHEMERAL);
+
+		if (b0 == NULL || b1 == NULL) {
+			shell_error(sh, "arena too small for two %u-byte "
+				    "buffers", DMA_BENCH_FRAME);
+			syn_mem_scratch_release(src);
+			syn_mem_reset_ephemeral();
+			return -ENOMEM;
+		}
+
+		dst0 = b0->data;
+		dst1 = b1->data;
+		arena_bufs = true;
 	}
-
-	uint32_t shape[1] = { DMA_BENCH_FRAME };
-	syn_tensor_t *b0 = syn_mem_tensor_alloc(shape, 1,
-						SYN_NPU_DTYPE_UINT8,
-						SYN_MEM_EPHEMERAL);
-	syn_tensor_t *b1 = syn_mem_tensor_alloc(shape, 1,
-						SYN_NPU_DTYPE_UINT8,
-						SYN_MEM_EPHEMERAL);
-
-	if (b0 == NULL || b1 == NULL) {
-		shell_error(sh, "arena too small for two %u-byte buffers",
-			    DMA_BENCH_FRAME);
-		syn_mem_scratch_release(src);
-		syn_mem_reset_ephemeral();
-		return -ENOMEM;
-	}
-
-	uint8_t *dst0 = b0->data;
-	uint8_t *dst1 = b1->data;
-#endif
 
 	/* Static frame body under the per-frame stamp */
 	memset(src, 0x5A, DMA_BENCH_FRAME);
@@ -642,10 +670,10 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 	syn_ingest_stats_t st;
 
 	syn_ingest_last_stats(&st);
-#ifndef CONFIG_SOC_SERIES_MCXNX4X
-	syn_mem_scratch_release(src);
-	syn_mem_reset_ephemeral();
-#endif
+	if (arena_bufs) {
+		syn_mem_scratch_release(src);
+		syn_mem_reset_ephemeral();
+	}
 
 	if (ret != 0) {
 		shell_error(sh, "ingest failed: %d (frames %u, dma errors "
@@ -656,7 +684,8 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "%u frames of %u bytes:", frames, DMA_BENCH_FRAME);
+	shell_print(sh, "%u frames of %u bytes (%s buffers):", frames,
+		    DMA_BENCH_FRAME, arena_bufs ? "arena" : "static");
 	shell_print(sh, "  cpu copy:  %u us (%u us/frame), %u corrupt",
 		    cpu_us, cpu_us / frames, cpu_bad);
 	shell_print(sh, "  dma ingest:%u us (%u us/frame), %u corrupt, "
@@ -1434,7 +1463,7 @@ static int cmd_dma_arena(const struct shell *sh, size_t argc, char **argv)
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_dma,
 	SHELL_CMD_ARG(bench, NULL,
 		      "Zero-copy ingest vs CPU copy: syn dma bench "
-		      "[frames]", cmd_dma_bench, 1, 1),
+		      "[frames] [arena|static]", cmd_dma_bench, 1, 2),
 #ifdef CONFIG_SOC_SERIES_MCXNX4X
 	SHELL_CMD(probe, NULL, "eDMA bring-up probe: 3 transfers + regs",
 		  cmd_dma_probe),
