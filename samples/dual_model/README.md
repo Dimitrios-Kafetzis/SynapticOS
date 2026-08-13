@@ -34,6 +34,14 @@ west build -b frdm_mcxn947_cpu1/mcxn947/cpu1 synaptic-os/samples/dual_model/remo
     --pristine -d build-dm-cpu1
 ```
 
+Real-NPU variant (eIQ Neutron enabled, arena trimmed to fit next to
+the driver's scratch/context statics - see `neutron.conf`):
+
+```sh
+west build -b frdm_mcxn947/mcxn947/cpu0 synaptic-os/samples/dual_model \
+    --pristine -d build-dm-cpu0 -- -DEXTRA_CONF_FILE=neutron.conf
+```
+
 ## Flash (ISP / blhost)
 
 Enter ISP mode (hold SW3, press+release SW1, release SW3), then:

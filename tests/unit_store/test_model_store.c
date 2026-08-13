@@ -18,6 +18,7 @@
 #include "syn_model_internal.h"
 #include "syn_flash_port.h"
 #include "syn_synm.h"
+#include "syn_synn.h"
 
 /* Board-realistic geometry, scaled: same 128-byte program page as
  * the MCX ROM API, 1 KB "sectors", 8 KB model slots (big enough for
@@ -30,8 +31,10 @@
 /* 2 x 1 KB registry copies + 2 x 8 KB slots. Shared with
  * test_model_ota.c (same geometry) to stay inside QEMU's 64 KB RAM;
  * the suites run sequentially and every fixture re-initializes it.
+ * 16-byte aligned like real flash so slot payload pointers land on
+ * the alignment the SYNN sections rely on.
  */
-uint8_t syn_test_flash_mem[2U * TSECTOR + 2U * TSLOT];
+uint8_t syn_test_flash_mem[2U * TSECTOR + 2U * TSLOT] __aligned(16);
 syn_flash_port_t syn_test_port;
 syn_flash_ram_ctx_t syn_test_ram_ctx;
 
@@ -44,6 +47,7 @@ static const syn_store_layout_t lay = {
     .registry_size = TSECTOR,
     .slot_off = { 2U * TSECTOR, 2U * TSECTOR + TSLOT },
     .slot_size = TSLOT,
+    .slot_count = 2U,
 };
 
 static uint8_t payload[1200];
@@ -387,4 +391,70 @@ ZTEST(syn_store_suite, test_ops_complete_quickly)
     store_reboot();
     zassert_true(syn_store_scan_us() < 50000U,
                  "boot scan took %u us", syn_store_scan_us());
+}
+
+/* Phase 6.1c: a Neutron SYNN payload rides inside the .synm image
+ * like any other model. Round-trip it through install -> commit ->
+ * reboot -> flash-mapped load and check the container survives
+ * byte-for-byte at the alignment the NPU sections rely on. On this
+ * build the NPU HAL is the stub, so load must succeed as an opaque
+ * blob (the SYNN header only means something to the Neutron HAL).
+ */
+ZTEST(syn_store_suite, test_synn_payload_round_trip)
+{
+    static uint8_t synn[192] __aligned(16);
+    struct syn_synn_hdr hdr = {
+        .magic          = SYN_SYNN_MAGIC,
+        .version        = SYN_SYNN_VERSION,
+        .microcode_off  = 48U,
+        .microcode_size = 20U,
+        .weights_off    = 80U,
+        .weights_size   = 40U,
+        .kernels_off    = 128U,
+        .kernels_size   = 1U,
+        .input_size     = 64U,
+        .output_size    = 12U,
+        .scratch_size   = 2048U,
+        .flags          = 0U,
+    };
+
+    memset(synn, 0, sizeof(synn));
+    memcpy(synn, &hdr, sizeof(hdr));
+    for (size_t i = 48; i < sizeof(synn); i++) {
+        synn[i] = (uint8_t)(i * 13U);
+    }
+
+    store_fresh();
+
+    syn_model_info_t info = make_info("neutron_rt", "1.0.0");
+    syn_model_handle_t h;
+
+    zassert_ok(syn_store_install(&info, synn, sizeof(synn), &h),
+               "SYNN install failed");
+    zassert_ok(syn_model_load(h), "stub load of SYNN payload failed");
+    zassert_ok(syn_model_unload(h));
+
+    store_reboot();
+    zassert_ok(syn_model_get_by_name("neutron_rt", &h),
+               "SYNN model lost across reboot");
+    zassert_ok(syn_model_load(h), "load after reboot failed");
+    zassert_ok(syn_model_unload(h));
+
+    const uint8_t *slotp =
+        &flash_mem[lay.slot_off[syn_store_active_slot()] +
+                   SYN_SYNM_HDR_SIZE];
+
+    zassert_equal((uintptr_t)slotp & 0xFU, 0U,
+                  "slot payload not 16-byte aligned");
+    zassert_mem_equal(slotp, synn, sizeof(synn),
+                      "SYNN payload altered by the store");
+
+    struct syn_synn_desc desc;
+
+    zassert_ok(syn_synn_parse(slotp, sizeof(synn), &desc),
+               "stored SYNN payload does not parse");
+    zassert_equal(desc.input_size, 64U, "input size");
+    zassert_equal(desc.output_size, 12U, "output size");
+    zassert_equal(desc.scratch_size, 2048U, "scratch size");
+    zassert_equal(desc.weights[0], (uint8_t)(80U * 13U), "weights bytes");
 }

@@ -18,11 +18,14 @@
  *  - alternating copies also halves erase wear; each copy records
  *    its own cumulative erase count (wear tracking).
  *
- * Model payloads live in the A/B slots as .synm images (64-byte
+ * Model payloads live in the layout's slots (2..SYN_STORE_MAX_SLOTS;
+ * Phase 6 generalized the original A/B pair) as .synm images (64-byte
  * header + raw model). A record only enters the registry after the
  * payload is fully written and CRC-verified, so a registry entry is
  * a guarantee that its slot content is complete: memory-mapped reads
- * of committed payloads are safe even on ECC flash.
+ * of committed payloads are safe even on ECC flash. Every occupied,
+ * non-staged slot is resident (registered, runnable by name); the
+ * active slot is the default model and rollback pivot.
  */
 
 #include <zephyr/kernel.h>
@@ -37,12 +40,20 @@ LOG_MODULE_REGISTER(syn_store, CONFIG_SYNAPTIC_LOG_LEVEL);
 #include "syn_synm.h"
 
 #define STORE_MAGIC   0x524E5953UL /* "SYNR" read as LE uint32 */
-#define STORE_VERSION 1U
+#define STORE_VERSION 2U
 
+/* Version history: v1 (Phase 4) had a fixed two-record table and
+ * both post-generation bytes reserved. v2 (Phase 6) names them
+ * slot_count and prev_active; the header size is unchanged and the
+ * records start at the same offset, so a v1 image is exactly a v2
+ * image with slot_count 2 and no rollback pivot - adopted in place,
+ * upgraded by the next commit.
+ */
 struct store_hdr {
 	uint32_t magic;
 	uint16_t version;
-	uint16_t rsvd0;
+	uint8_t  slot_count;    /* records in this image (v2; v1: rsvd) */
+	uint8_t  prev_active;   /* rollback pivot (v2; v1: rsvd) */
 	uint32_t generation;
 	uint32_t wear;          /* erase count of this copy, incl. this write */
 	uint8_t  active_slot;   /* SYN_STORE_SLOT_NONE if none */
@@ -52,11 +63,13 @@ struct store_hdr {
 	uint32_t crc32;         /* over the whole image, this field zeroed */
 };
 
-#define STORE_IMG_SIZE (sizeof(struct store_hdr) + 2U * sizeof(syn_model_info_t))
+#define STORE_IMG_MAX (sizeof(struct store_hdr) + \
+		       (size_t)SYN_STORE_MAX_SLOTS * sizeof(syn_model_info_t))
 /* image padded to page multiple at write time */
-#define STORE_BUF_SIZE 512U
-BUILD_ASSERT(STORE_BUF_SIZE >= STORE_IMG_SIZE + 128U,
+#define STORE_BUF_SIZE 1024U
+BUILD_ASSERT(STORE_BUF_SIZE >= STORE_IMG_MAX + 128U,
 	     "store image buffer too small");
+BUILD_ASSERT(SYN_STORE_MAX_SLOTS <= 8, "occupied_mask is 8 bits");
 
 static struct {
 	bool ready;
@@ -66,9 +79,10 @@ static struct {
 	/* adopted state */
 	uint32_t generation;
 	uint8_t active_slot;
+	uint8_t prev_active;
 	uint8_t staged_slot;
 	uint8_t occupied_mask;
-	syn_model_info_t rec[2];
+	syn_model_info_t rec[SYN_STORE_MAX_SLOTS];
 
 	/* per registry copy */
 	uint32_t wear[2];
@@ -81,6 +95,14 @@ static struct {
 
 	struct k_mutex lock;
 } st;
+
+/* Registry image size for a given record count */
+static uint32_t img_size(uint8_t slots)
+{
+	return (uint32_t)(sizeof(struct store_hdr) +
+			  (size_t)slots * sizeof(syn_model_info_t));
+}
+
 
 static uint8_t img_buf[STORE_BUF_SIZE];
 static uint8_t io_buf[256];
@@ -101,6 +123,8 @@ static uint32_t image_build(uint32_t generation, uint32_t wear)
 	struct store_hdr hdr = {
 		.magic = STORE_MAGIC,
 		.version = STORE_VERSION,
+		.slot_count = st.lay.slot_count,
+		.prev_active = st.prev_active,
 		.generation = generation,
 		.wear = wear,
 		.active_slot = st.active_slot,
@@ -108,21 +132,32 @@ static uint32_t image_build(uint32_t generation, uint32_t wear)
 		.occupied_mask = st.occupied_mask,
 		.crc32 = 0U,
 	};
+	uint32_t size = img_size(st.lay.slot_count);
 
 	memset(img_buf, 0xFF, sizeof(img_buf));
 	memcpy(img_buf, &hdr, sizeof(hdr));
-	memcpy(&img_buf[sizeof(hdr)], &st.rec[0], sizeof(st.rec[0]));
-	memcpy(&img_buf[sizeof(hdr) + sizeof(st.rec[0])], &st.rec[1],
-	       sizeof(st.rec[1]));
+	for (uint8_t s = 0; s < st.lay.slot_count; s++) {
+		memcpy(&img_buf[sizeof(hdr) + s * sizeof(st.rec[0])],
+		       &st.rec[s], sizeof(st.rec[0]));
+	}
 
-	uint32_t crc = crc32_ieee(img_buf, STORE_IMG_SIZE);
+	uint32_t crc = crc32_ieee(img_buf, size);
 
 	memcpy(&img_buf[offsetof(struct store_hdr, crc32)], &crc,
 	       sizeof(crc));
-	return round_up(STORE_IMG_SIZE, st.port->page_size);
+	return round_up(size, st.port->page_size);
 }
 
-/* Read one registry copy into img_buf and validate it. */
+/* Effective record count of an on-flash image (v1 = fixed pair) */
+static uint8_t hdr_slots(const struct store_hdr *hdr)
+{
+	return (hdr->version == 1U) ? 2U : hdr->slot_count;
+}
+
+/* Read one registry copy into img_buf and validate it. Accepts the
+ * current version and the Phase 4 two-slot v1 layout (same header
+ * size, same record offsets - see the version history above).
+ */
 static bool copy_load(uint8_t copy, struct store_hdr *hdr_out)
 {
 	uint32_t off = st.lay.registry_off[copy];
@@ -131,17 +166,42 @@ static bool copy_load(uint8_t copy, struct store_hdr *hdr_out)
 	if (syn_flash_is_blank(st.port, off, st.port->page_size) != 0) {
 		return false; /* blank or unreadable: invalid */
 	}
-	if (syn_flash_read(st.port, off, img_buf, STORE_IMG_SIZE) != 0) {
+	if (syn_flash_read(st.port, off, img_buf, sizeof(hdr)) != 0) {
 		return false; /* torn pages read as errors on ECC flash */
 	}
 
 	memcpy(&hdr, img_buf, sizeof(hdr));
-	if (hdr.magic != STORE_MAGIC || hdr.version != STORE_VERSION) {
+	if (hdr.magic != STORE_MAGIC ||
+	    (hdr.version != STORE_VERSION && hdr.version != 1U)) {
 		return false;
 	}
-	if ((hdr.active_slot > 1U && hdr.active_slot != SYN_STORE_SLOT_NONE) ||
-	    (hdr.staged_slot > 1U && hdr.staged_slot != SYN_STORE_SLOT_NONE) ||
-	    (hdr.occupied_mask & ~0x3U) != 0U) {
+
+	uint8_t slots = hdr_slots(&hdr);
+
+	if (slots < 2U || slots > SYN_STORE_MAX_SLOTS ||
+	    slots > st.lay.slot_count) {
+		return false; /* more records than this layout can hold */
+	}
+
+	uint32_t size = img_size(slots);
+
+	if (syn_flash_read(st.port, off, img_buf, size) != 0) {
+		return false;
+	}
+
+	uint8_t mask = (uint8_t)(BIT(slots) - 1U);
+
+	if ((hdr.active_slot >= slots &&
+	     hdr.active_slot != SYN_STORE_SLOT_NONE) ||
+	    (hdr.staged_slot >= slots &&
+	     hdr.staged_slot != SYN_STORE_SLOT_NONE) ||
+	    (hdr.occupied_mask & ~mask) != 0U) {
+		return false;
+	}
+	if (hdr.version == 1U) {
+		hdr.prev_active = SYN_STORE_SLOT_NONE;
+	} else if (hdr.prev_active >= slots &&
+		   hdr.prev_active != SYN_STORE_SLOT_NONE) {
 		return false;
 	}
 
@@ -149,7 +209,7 @@ static bool copy_load(uint8_t copy, struct store_hdr *hdr_out)
 
 	memset(&img_buf[offsetof(struct store_hdr, crc32)], 0,
 	       sizeof(uint32_t));
-	if (crc32_ieee(img_buf, STORE_IMG_SIZE) != stored_crc) {
+	if (crc32_ieee(img_buf, size) != stored_crc) {
 		return false;
 	}
 
@@ -182,9 +242,10 @@ static int copy_commit(uint8_t copy, uint32_t gen)
 	/* read-back verify */
 	uint8_t page[64];
 	uint32_t pos = 0;
+	uint32_t verify = img_size(st.lay.slot_count);
 
-	while (pos < STORE_IMG_SIZE) {
-		uint32_t n = MIN(sizeof(page), STORE_IMG_SIZE - pos);
+	while (pos < verify) {
+		uint32_t n = MIN(sizeof(page), verify - pos);
 
 		ret = syn_flash_read(st.port, off + pos, page, n);
 		if (ret != 0 || memcmp(page, &img_buf[pos], n) != 0) {
@@ -239,18 +300,62 @@ static int slot_payload_crc(uint8_t slot, uint32_t size, uint32_t *crc_out)
 	return 0;
 }
 
-static void ram_unregister(uint8_t slot)
+/* Handle of THIS slot's registered model, if it is the one that owns
+ * the name (several slots may carry records with the same name; only
+ * one of them can be resident, and flash_offset tells them apart).
+ */
+static bool slot_handle(uint8_t slot, syn_model_handle_t *h)
+{
+	syn_model_info_t info;
+
+	if (syn_model_get_by_name(st.rec[slot].name, h) != 0 ||
+	    syn_model_get_info(*h, &info) != 0) {
+		return false;
+	}
+	return info.flash_offset == st.rec[slot].flash_offset;
+}
+
+/* Drop the slot's model from the RAM registry. -EBUSY when it still
+ * has a suspended layered job (the quiesce gate only drains RUNNING
+ * jobs; evicting under a suspended one would dangle its model).
+ */
+static int ram_unregister(uint8_t slot)
 {
 	syn_model_handle_t h;
 
-	if (syn_model_get_by_name(st.rec[slot].name, &h) == 0) {
-		syn_model_unregister(h);
+	if (!slot_handle(slot, &h)) {
+		return 0; /* not resident: nothing to drop */
 	}
+	return syn_model_unregister(h);
 }
 
 static int ram_register(uint8_t slot, syn_model_handle_t *handle)
 {
 	syn_model_handle_t h;
+
+	/* name replacement: a same-name resident from another slot
+	 * gives way (multi-model residency is keyed by name)
+	 */
+	if (syn_model_get_by_name(st.rec[slot].name, &h) == 0) {
+		syn_model_info_t info;
+
+		if (syn_model_get_info(h, &info) == 0 &&
+		    info.flash_offset == st.rec[slot].flash_offset) {
+			if (handle != NULL) {
+				*handle = h;
+			}
+			return 0; /* already resident */
+		}
+
+		int ret = syn_model_unregister(h);
+
+		if (ret != 0) {
+			LOG_ERR("Cannot replace resident '%s': %d",
+				st.rec[slot].name, ret);
+			return ret;
+		}
+	}
+
 	int ret = syn_model_register(&st.rec[slot], &h);
 
 	if (ret != 0) {
@@ -273,18 +378,26 @@ static int ram_register(uint8_t slot, syn_model_handle_t *handle)
 static int layout_validate(const syn_flash_port_t *port,
 			   const syn_store_layout_t *lay)
 {
-	struct { uint32_t off, size; } r[4] = {
-		{ lay->registry_off[0], lay->registry_size },
-		{ lay->registry_off[1], lay->registry_size },
-		{ lay->slot_off[0], lay->slot_size },
-		{ lay->slot_off[1], lay->slot_size },
-	};
+	struct { uint32_t off, size; } r[2 + SYN_STORE_MAX_SLOTS];
+	int regions = 2 + lay->slot_count;
+
+	if (lay->slot_count < 2U || lay->slot_count > SYN_STORE_MAX_SLOTS) {
+		return -EINVAL;
+	}
+	r[0].off = lay->registry_off[0];
+	r[0].size = lay->registry_size;
+	r[1].off = lay->registry_off[1];
+	r[1].size = lay->registry_size;
+	for (uint8_t s = 0; s < lay->slot_count; s++) {
+		r[2 + s].off = lay->slot_off[s];
+		r[2 + s].size = lay->slot_size;
+	}
 
 	if (lay->registry_size == 0U || lay->slot_size == 0U) {
 		return -EINVAL;
 	}
 	if (lay->registry_size <
-	    round_up(STORE_IMG_SIZE, port->page_size)) {
+	    round_up(img_size(lay->slot_count), port->page_size)) {
 		return -EINVAL;
 	}
 	if (lay->slot_size <= SYN_SYNM_HDR_SIZE) {
@@ -296,14 +409,14 @@ static int layout_validate(const syn_flash_port_t *port,
 		return -EINVAL;
 	}
 
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < regions; i++) {
 		if ((r[i].off % port->sector_size) != 0U ||
 		    (r[i].size % port->sector_size) != 0U ||
 		    r[i].off > port->size ||
 		    r[i].size > port->size - r[i].off) {
 			return -EINVAL;
 		}
-		for (int j = i + 1; j < 4; j++) {
+		for (int j = i + 1; j < regions; j++) {
 			if (r[i].off < r[j].off + r[j].size &&
 			    r[j].off < r[i].off + r[i].size) {
 				return -EINVAL; /* overlap */
@@ -336,6 +449,7 @@ int syn_store_init(const syn_flash_port_t *port,
 	st.port = port;
 	st.lay = *layout;
 	st.active_slot = SYN_STORE_SLOT_NONE;
+	st.prev_active = SYN_STORE_SLOT_NONE;
 	st.staged_slot = SYN_STORE_SLOT_NONE;
 
 	struct store_hdr hdr[2];
@@ -366,25 +480,44 @@ int syn_store_init(const syn_flash_port_t *port,
 		st.newest_copy = newest;
 		st.generation = hdr[newest].generation;
 		st.active_slot = hdr[newest].active_slot;
+		st.prev_active = hdr[newest].prev_active;
 		st.staged_slot = hdr[newest].staged_slot;
 		st.occupied_mask = hdr[newest].occupied_mask;
-		memcpy(&st.rec[0], &img_buf[sizeof(struct store_hdr)],
-		       sizeof(st.rec[0]));
-		memcpy(&st.rec[1],
-		       &img_buf[sizeof(struct store_hdr) + sizeof(st.rec[0])],
-		       sizeof(st.rec[1]));
-		LOG_INF("Registry adopted: copy %u gen %u active %u "
+		for (uint8_t s = 0; s < hdr_slots(&hdr[newest]); s++) {
+			memcpy(&st.rec[s],
+			       &img_buf[sizeof(struct store_hdr) +
+					s * sizeof(st.rec[0])],
+			       sizeof(st.rec[0]));
+		}
+		LOG_INF("Registry adopted: copy %u gen %u (v%u) active %u "
 			"staged %u occupied 0x%x",
-			newest, st.generation, st.active_slot,
-			st.staged_slot, st.occupied_mask);
+			newest, st.generation, hdr[newest].version,
+			st.active_slot, st.staged_slot, st.occupied_mask);
 	} else {
 		LOG_INF("Registry empty: starting fresh");
 	}
 
 	st.ready = true;
 
+	/* Every occupied, non-staged slot is resident. The active slot
+	 * registers first so it wins any same-name collision.
+	 */
 	if (st.active_slot != SYN_STORE_SLOT_NONE) {
 		(void)ram_register(st.active_slot, NULL);
+	}
+	for (uint8_t s = 0; s < st.lay.slot_count; s++) {
+		syn_model_handle_t have;
+
+		if ((st.occupied_mask & BIT(s)) == 0U ||
+		    s == st.active_slot || s == st.staged_slot) {
+			continue;
+		}
+		if (syn_model_get_by_name(st.rec[s].name, &have) == 0) {
+			LOG_WRN("Slot %u '%s' not resident: name held by "
+				"another slot", s, st.rec[s].name);
+			continue;
+		}
+		(void)ram_register(s, NULL);
 	}
 
 	st.scan_us = cycles_to_us(t0);
@@ -408,21 +541,33 @@ int syn_store_staging_slot(uint8_t *slot)
 		return -EINVAL;
 	}
 
-	if ((st.occupied_mask & BIT(0)) == 0U) {
-		*slot = 0U;
-	} else if ((st.occupied_mask & BIT(1)) == 0U) {
-		*slot = 1U;
-	} else if (st.active_slot == 0U) {
-		*slot = 1U;
-	} else {
-		*slot = 0U;
+	/* first free slot; else the first occupied one that is neither
+	 * active nor the rollback pivot; else the first non-active
+	 */
+	for (uint8_t s = 0; s < st.lay.slot_count; s++) {
+		if ((st.occupied_mask & BIT(s)) == 0U) {
+			*slot = s;
+			return 0;
+		}
 	}
-	return 0;
+	for (uint8_t s = 0; s < st.lay.slot_count; s++) {
+		if (s != st.active_slot && s != st.prev_active) {
+			*slot = s;
+			return 0;
+		}
+	}
+	for (uint8_t s = 0; s < st.lay.slot_count; s++) {
+		if (s != st.active_slot) {
+			*slot = s;
+			return 0;
+		}
+	}
+	return -ENOSPC; /* slot_count >= 2: unreachable */
 }
 
 int syn_store_slot_bounds(uint8_t slot, uint32_t *off, uint32_t *size)
 {
-	if (!st.ready || slot > 1U) {
+	if (!st.ready || slot >= st.lay.slot_count) {
 		return -EINVAL;
 	}
 	if (off != NULL) {
@@ -434,9 +579,52 @@ int syn_store_slot_bounds(uint8_t slot, uint32_t *off, uint32_t *size)
 	return 0;
 }
 
+int syn_store_begin_staging(uint8_t slot)
+{
+	if (!st.ready || slot >= st.lay.slot_count) {
+		return -EINVAL;
+	}
+	if (slot == st.active_slot) {
+		return -EBUSY;
+	}
+	if ((st.occupied_mask & BIT(slot)) == 0U) {
+		return 0; /* already free: nothing to evict */
+	}
+
+	k_mutex_lock(&st.lock, K_FOREVER);
+
+	int ret = ram_unregister(slot);
+
+	if (ret != 0) {
+		k_mutex_unlock(&st.lock);
+		return ret; /* -EBUSY: suspended layered job */
+	}
+
+	uint8_t s_occ = st.occupied_mask, s_staged = st.staged_slot;
+	uint8_t s_prev = st.prev_active;
+
+	st.occupied_mask &= (uint8_t)~BIT(slot);
+	if (st.staged_slot == slot) {
+		st.staged_slot = SYN_STORE_SLOT_NONE;
+	}
+	if (st.prev_active == slot) {
+		st.prev_active = SYN_STORE_SLOT_NONE;
+	}
+
+	ret = commit();
+
+	if (ret != 0) {
+		st.occupied_mask = s_occ;
+		st.staged_slot = s_staged;
+		st.prev_active = s_prev;
+	}
+	k_mutex_unlock(&st.lock);
+	return ret;
+}
+
 int syn_store_mark_staged(uint8_t slot, const syn_model_info_t *info)
 {
-	if (!st.ready || slot > 1U || info == NULL) {
+	if (!st.ready || slot >= st.lay.slot_count || info == NULL) {
 		return -EINVAL;
 	}
 	if (slot == st.active_slot) {
@@ -465,7 +653,7 @@ int syn_store_mark_staged(uint8_t slot, const syn_model_info_t *info)
 
 int syn_store_activate(uint8_t slot)
 {
-	if (!st.ready || slot > 1U) {
+	if (!st.ready || slot >= st.lay.slot_count) {
 		return -EINVAL;
 	}
 	if ((st.occupied_mask & BIT(slot)) == 0U) {
@@ -477,10 +665,28 @@ int syn_store_activate(uint8_t slot)
 
 	k_mutex_lock(&st.lock, K_FOREVER);
 
+	/* The outgoing model STAYS resident (multi-model store); only
+	 * NPU residency moves. Refuse before touching flash if the
+	 * outgoing model cannot give up the NPU (suspended layered
+	 * job: the quiesce gate only drains RUNNING jobs).
+	 */
 	uint8_t old_active = st.active_slot;
+	syn_model_handle_t oh = SYN_MODEL_INVALID;
+	bool was_loaded = false;
+
+	if (old_active != SYN_STORE_SLOT_NONE && slot_handle(old_active, &oh)) {
+		was_loaded = syn_model_is_loaded(oh);
+		if (was_loaded && syn_model_unload(oh) != 0) {
+			k_mutex_unlock(&st.lock);
+			return -EBUSY;
+		}
+	}
+
 	uint8_t s_staged = st.staged_slot;
+	uint8_t s_prev = st.prev_active;
 
 	st.active_slot = slot;
+	st.prev_active = old_active;
 	if (st.staged_slot == slot) {
 		st.staged_slot = SYN_STORE_SLOT_NONE;
 	}
@@ -490,25 +696,18 @@ int syn_store_activate(uint8_t slot)
 	if (ret != 0) {
 		st.active_slot = old_active;
 		st.staged_slot = s_staged;
+		st.prev_active = s_prev;
+		if (was_loaded && oh != SYN_MODEL_INVALID) {
+			(void)syn_model_load(oh); /* restore NPU residency */
+		}
 		k_mutex_unlock(&st.lock);
 		return ret;
 	}
 
-	/* flash state is authoritative; now swing the RAM registry.
-	 * If the outgoing model was NPU-resident, hot-load the new one
-	 * in its place (waits out any in-flight inference).
+	/* flash state is authoritative; register the new active (name
+	 * replacement evicts a same-name resident) and hand it the NPU
+	 * if the outgoing model held it
 	 */
-	bool was_loaded = false;
-
-	if (old_active != SYN_STORE_SLOT_NONE) {
-		syn_model_handle_t oh;
-
-		if (syn_model_get_by_name(st.rec[old_active].name, &oh) == 0) {
-			was_loaded = syn_model_is_loaded(oh);
-		}
-		ram_unregister(old_active);
-	}
-
 	syn_model_handle_t nh = SYN_MODEL_INVALID;
 
 	(void)ram_register(slot, &nh);
@@ -536,11 +735,20 @@ int syn_store_rollback(void)
 	uint8_t cur = st.active_slot;
 	uint8_t prev = SYN_STORE_SLOT_NONE;
 
-	/* rollback target: the occupied, non-active, non-staged slot */
-	for (uint8_t s = 0; s < 2U; s++) {
-		if ((st.occupied_mask & BIT(s)) != 0U &&
-		    s != cur && s != st.staged_slot) {
-			prev = s;
+	/* rollback target: the recorded pivot; for pre-v2 registries
+	 * (no pivot) fall back to the occupied, non-active, non-staged
+	 * scan of the original A/B design
+	 */
+	if (st.prev_active != SYN_STORE_SLOT_NONE &&
+	    st.prev_active != cur &&
+	    (st.occupied_mask & BIT(st.prev_active)) != 0U) {
+		prev = st.prev_active;
+	} else {
+		for (uint8_t s = 0; s < st.lay.slot_count; s++) {
+			if ((st.occupied_mask & BIT(s)) != 0U &&
+			    s != cur && s != st.staged_slot) {
+				prev = s;
+			}
 		}
 	}
 	if (prev == SYN_STORE_SLOT_NONE) {
@@ -548,25 +756,33 @@ int syn_store_rollback(void)
 		return -ENOENT;
 	}
 
+	/* the demoted model stays resident; NPU residency moves */
+	syn_model_handle_t ch = SYN_MODEL_INVALID;
+	bool was_loaded = false;
+
+	if (cur != SYN_STORE_SLOT_NONE && slot_handle(cur, &ch)) {
+		was_loaded = syn_model_is_loaded(ch);
+		if (was_loaded && syn_model_unload(ch) != 0) {
+			k_mutex_unlock(&st.lock);
+			return -EBUSY;
+		}
+	}
+
+	uint8_t s_prev = st.prev_active;
+
 	st.active_slot = prev;
+	st.prev_active = cur;
 
 	int ret = commit();
 
 	if (ret != 0) {
 		st.active_slot = cur;
+		st.prev_active = s_prev;
+		if (was_loaded && ch != SYN_MODEL_INVALID) {
+			(void)syn_model_load(ch);
+		}
 		k_mutex_unlock(&st.lock);
 		return ret;
-	}
-
-	bool was_loaded = false;
-
-	if (cur != SYN_STORE_SLOT_NONE) {
-		syn_model_handle_t ch;
-
-		if (syn_model_get_by_name(st.rec[cur].name, &ch) == 0) {
-			was_loaded = syn_model_is_loaded(ch);
-		}
-		ram_unregister(cur);
 	}
 
 	syn_model_handle_t ph = SYN_MODEL_INVALID;
@@ -635,6 +851,13 @@ int syn_store_install(const syn_model_info_t *info,
 
 	if (info->crc32 != 0U && info->crc32 != crc) {
 		return -EILSEQ;
+	}
+
+	/* evict the slot's occupant before erasing its payload */
+	int eret = syn_store_begin_staging(slot);
+
+	if (eret != 0) {
+		return eret;
 	}
 
 	k_mutex_lock(&st.lock, K_FOREVER);
@@ -718,6 +941,7 @@ int syn_store_install(const syn_model_info_t *info,
 	uint8_t old_active = st.active_slot;
 	syn_model_info_t saved = st.rec[slot];
 	uint8_t s_occ = st.occupied_mask, s_staged = st.staged_slot;
+	uint8_t s_prev = st.prev_active;
 
 	st.rec[slot] = rec;
 	st.occupied_mask |= BIT(slot);
@@ -725,6 +949,9 @@ int syn_store_install(const syn_model_info_t *info,
 		st.staged_slot = SYN_STORE_SLOT_NONE;
 	}
 	st.active_slot = slot;
+	if (old_active != slot) {
+		st.prev_active = old_active;
+	}
 
 	ret = commit();
 
@@ -733,13 +960,14 @@ int syn_store_install(const syn_model_info_t *info,
 		st.occupied_mask = s_occ;
 		st.staged_slot = s_staged;
 		st.active_slot = old_active;
+		st.prev_active = s_prev;
 		k_mutex_unlock(&st.lock);
 		return ret;
 	}
 
-	if (old_active != SYN_STORE_SLOT_NONE && old_active != slot) {
-		ram_unregister(old_active);
-	}
+	/* the previous active model stays resident; same-name installs
+	 * replace it in the RAM registry inside ram_register()
+	 */
 	ret = ram_register(slot, handle);
 
 	k_mutex_unlock(&st.lock);
@@ -754,6 +982,16 @@ uint8_t syn_store_active_slot(void)
 	return st.ready ? st.active_slot : SYN_STORE_SLOT_NONE;
 }
 
+uint8_t syn_store_prev_active_slot(void)
+{
+	return st.ready ? st.prev_active : SYN_STORE_SLOT_NONE;
+}
+
+uint8_t syn_store_slot_count(void)
+{
+	return st.ready ? st.lay.slot_count : 0U;
+}
+
 uint8_t syn_store_staged_slot(void)
 {
 	return st.ready ? st.staged_slot : SYN_STORE_SLOT_NONE;
@@ -761,7 +999,7 @@ uint8_t syn_store_staged_slot(void)
 
 int syn_store_slot_info(uint8_t slot, syn_model_info_t *info)
 {
-	if (!st.ready || slot > 1U || info == NULL) {
+	if (!st.ready || slot >= st.lay.slot_count || info == NULL) {
 		return -EINVAL;
 	}
 	if ((st.occupied_mask & BIT(slot)) == 0U) {
@@ -831,6 +1069,7 @@ static int syn_store_auto_init(void)
 			SYN_PART_SLOT_B_OFFSET - SYN_FLASH_WRITABLE_BASE,
 		},
 		.slot_size = SYN_PART_SLOT_A_SIZE,
+		.slot_count = 2U,
 	};
 
 	int ret = syn_store_init(&mcx_port, &map_layout);

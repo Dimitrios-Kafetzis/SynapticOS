@@ -24,23 +24,44 @@ not belong in an Apache-2.0 tree). Regenerate it locally:
 
    ```sh
    python3 -m venv ~/.venvs/neutron
-   ~/.venvs/neutron/bin/pip install neutron_converter_sdk_25_12 \
+   ~/.venvs/neutron/bin/pip install neutron_converter_SDK_26_03 \
        --extra-index-url https://eiq.nxp.com/repository
    ```
+
+   The converter release and the on-target driver are a locked
+   pair: the microcode carries the driver generation hash and the
+   driver rejects any other. The `west.yml` eiq pin tracks Neutron
+   Software 3.0.0, which pairs with SDK_26_03 output.
 
 2. Convert an INT8 LiteRT/TFLite model for target `mcxn94x` with
    `dumpMicrocodeFile/dumpWeightsFile/dumpKernelsFile` enabled
    (`convertModel` from the `neutron_converter` Python module). The
-   MLPerf Tiny ResNet-8 CIFAR-10 model converts cleanly (23/24 ops
-   on the NPU, softmax stays on the CPU, so the NPU output is the
-   pre-softmax logits; top-1 is unaffected).
+   MLPerf Tiny ResNet-8 CIFAR-10 model converts cleanly (24/26 ops
+   on the NPU; softmax and the output-trim slice stay on the CPU,
+   so the NPU output is the pre-softmax logits padded to 12 lanes;
+   top-1 is unaffected).
 
-3. Pack the dumped microcode / weights / kernels triple into the
-   SYNN blob and place it at `models/neutron/resnet_cifar10.synn`
-   (input 3072 B, output 10 B for this model).
+3. Pack the dumped microcode / weights / kernels triple with
+   `tools/syn_model_pack.py` (input 3072 B, output 12 B and
+   49,152 B scratch for this model):
 
-Set `CONFIG_SYNAPTIC_NEUTRON_SCRATCH_SIZE` to the scratch size from
-the converter's memory report (49,152 B for this model).
+   ```sh
+   python3 tools/syn_model_pack.py \
+       --neutron-microcode ucode.bin --neutron-weights weights.bin \
+       --neutron-kernels kernels.bin --scratch-size 49152 \
+       --name resnet_cifar10 --input-shape 1,32,32,3 \
+       --output-shape 1,12 \
+       --output models/neutron/resnet_cifar10.synm \
+       --raw-output models/neutron/resnet_cifar10.synn
+   ```
+
+   The `.synn` file is the bare SYNN payload this sample embeds;
+   the `.synm` file is the same payload in the model-store/OTA
+   container.
+
+Set `CONFIG_SYNAPTIC_NEUTRON_SCRATCH_SIZE` to at least the scratch
+size from the converter's memory report; the HAL refuses models
+whose SYNN header asks for more than the configured buffer.
 
 ## Build and run
 

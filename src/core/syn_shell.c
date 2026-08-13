@@ -496,11 +496,18 @@ static const char *priority_name(syn_priority_t prio)
 /* eDMA bring-up diagnostics (board-only, defined in the eDMA HAL) */
 void syn_hal_dma_dump(int channel);
 
-/* Shared by `syn dma probe` and `syn dma bench`: the eDMA cannot
- * reach the tensor arena region (its non-secure bus transactions
- * fault on that RAM's security attributes, and with no-error-irq the
- * failure is a silent timeout - board finding). Static buffers in
- * the main RAM region are DMA-reachable.
+/* Shared by `syn dma probe` and `syn dma bench`. The Phase 5 "eDMA
+ * cannot reach the tensor arena" finding did NOT survive the Phase 6
+ * reachability experiments (`syn dma arena`, S5): with the P5 eDMA
+ * fixes in place (software START, no aborts between one-shots) the
+ * arena is reachable at every tested address, and the AHBSC boots
+ * with secure checking disabled. Latent constraint to remember: RAM
+ * block RAMC0 0x20010000-0x20017FFF boots with a secure-only MPC
+ * rule, which starts mattering (silently, for non-secure-attributed
+ * eDMA transactions) if secure checking is ever enabled; CH_SBR SEC
+ * per channel is the proven fix. The bench keeps using statics only
+ * so its numbers stay comparable across phases; moving the ingest
+ * path onto arena tensors is the 6.2 follow-up.
  */
 static uint8_t dma_buf_src[8192] __aligned(4);
 static uint8_t dma_buf_a[8192] __aligned(4);
@@ -551,10 +558,20 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 {
 	uint32_t frames = (argc >= 2) ? (uint32_t)strtoul(argv[1], NULL, 0)
 				      : 64U;
+	bool use_static = false;
 
 	if (frames == 0U) {
 		shell_error(sh, "frames must be > 0");
 		return -EINVAL;
+	}
+	if (argc >= 3) {
+		if (strcmp(argv[2], "static") == 0) {
+			use_static = true;
+		} else if (strcmp(argv[2], "arena") != 0) {
+			shell_error(sh, "Bad buffer mode '%s' (use arena "
+				    "or static)", argv[2]);
+			return -EINVAL;
+		}
 	}
 
 	int ret = syn_hal_dma_init();
@@ -564,41 +581,59 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-#ifdef CONFIG_SOC_SERIES_MCXNX4X
-	/* Arena RAM is not eDMA-reachable (see the board finding at the
-	 * shared buffers above): bench from DMA-reachable statics.
+	/* Default: genuine zero-copy into arena tensors - the arena IS
+	 * eDMA-reachable (the Phase 6 `syn dma arena` experiments
+	 * revised the Phase 5 finding). The `static` mode keeps the
+	 * board-static variant for cross-phase comparability.
 	 */
-	uint8_t *src = dma_buf_src;
-	uint8_t *dst0 = dma_buf_a;
-	uint8_t *dst1 = dma_buf_b;
+	uint8_t *src = NULL;
+	uint8_t *dst0 = NULL;
+	uint8_t *dst1 = NULL;
+	bool arena_bufs = false;
+
+#ifdef CONFIG_SOC_SERIES_MCXNX4X
+	if (use_static) {
+		src = dma_buf_src;
+		dst0 = dma_buf_a;
+		dst1 = dma_buf_b;
+	}
 #else
-	uint8_t *src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
+	if (use_static) {
+		shell_error(sh, "static buffers exist only on the MCXN "
+			    "build");
+		return -EINVAL;
+	}
+#endif
 
 	if (src == NULL) {
-		shell_error(sh, "scratch pool too small for a %u-byte "
-			    "frame", DMA_BENCH_FRAME);
-		return -ENOMEM;
+		src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
+
+		if (src == NULL) {
+			shell_error(sh, "scratch pool too small for a "
+				    "%u-byte frame", DMA_BENCH_FRAME);
+			return -ENOMEM;
+		}
+
+		uint32_t shape[1] = { DMA_BENCH_FRAME };
+		syn_tensor_t *b0 = syn_mem_tensor_alloc(shape, 1,
+							SYN_NPU_DTYPE_UINT8,
+							SYN_MEM_EPHEMERAL);
+		syn_tensor_t *b1 = syn_mem_tensor_alloc(shape, 1,
+							SYN_NPU_DTYPE_UINT8,
+							SYN_MEM_EPHEMERAL);
+
+		if (b0 == NULL || b1 == NULL) {
+			shell_error(sh, "arena too small for two %u-byte "
+				    "buffers", DMA_BENCH_FRAME);
+			syn_mem_scratch_release(src);
+			syn_mem_reset_ephemeral();
+			return -ENOMEM;
+		}
+
+		dst0 = b0->data;
+		dst1 = b1->data;
+		arena_bufs = true;
 	}
-
-	uint32_t shape[1] = { DMA_BENCH_FRAME };
-	syn_tensor_t *b0 = syn_mem_tensor_alloc(shape, 1,
-						SYN_NPU_DTYPE_UINT8,
-						SYN_MEM_EPHEMERAL);
-	syn_tensor_t *b1 = syn_mem_tensor_alloc(shape, 1,
-						SYN_NPU_DTYPE_UINT8,
-						SYN_MEM_EPHEMERAL);
-
-	if (b0 == NULL || b1 == NULL) {
-		shell_error(sh, "arena too small for two %u-byte buffers",
-			    DMA_BENCH_FRAME);
-		syn_mem_scratch_release(src);
-		syn_mem_reset_ephemeral();
-		return -ENOMEM;
-	}
-
-	uint8_t *dst0 = b0->data;
-	uint8_t *dst1 = b1->data;
-#endif
 
 	/* Static frame body under the per-frame stamp */
 	memset(src, 0x5A, DMA_BENCH_FRAME);
@@ -635,10 +670,10 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 	syn_ingest_stats_t st;
 
 	syn_ingest_last_stats(&st);
-#ifndef CONFIG_SOC_SERIES_MCXNX4X
-	syn_mem_scratch_release(src);
-	syn_mem_reset_ephemeral();
-#endif
+	if (arena_bufs) {
+		syn_mem_scratch_release(src);
+		syn_mem_reset_ephemeral();
+	}
 
 	if (ret != 0) {
 		shell_error(sh, "ingest failed: %d (frames %u, dma errors "
@@ -649,7 +684,8 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	shell_print(sh, "%u frames of %u bytes:", frames, DMA_BENCH_FRAME);
+	shell_print(sh, "%u frames of %u bytes (%s buffers):", frames,
+		    DMA_BENCH_FRAME, arena_bufs ? "arena" : "static");
 	shell_print(sh, "  cpu copy:  %u us (%u us/frame), %u corrupt",
 		    cpu_us, cpu_us / frames, cpu_bad);
 	shell_print(sh, "  dma ingest:%u us (%u us/frame), %u corrupt, "
@@ -967,26 +1003,62 @@ static int cmd_store_status(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 
-	shell_print(sh, "generation %u  active slot %u  staged slot %u",
-		    syn_store_generation(), syn_store_active_slot(),
-		    syn_store_staged_slot());
+	shell_print(sh, "generation %u  active slot %u  staged slot %u  "
+		    "prev slot %u", syn_store_generation(),
+		    syn_store_active_slot(), syn_store_staged_slot(),
+		    syn_store_prev_active_slot());
 	shell_print(sh, "registry wear: copy0 %u copy1 %u erases",
 		    syn_store_wear(0), syn_store_wear(1));
 	shell_print(sh, "last commit %u us, boot scan %u us",
 		    syn_store_last_commit_us(), syn_store_scan_us());
 
-	for (uint8_t s = 0; s < 2U; s++) {
+	for (uint8_t s = 0; s < syn_store_slot_count(); s++) {
 		syn_model_info_t info;
 
 		if (syn_store_slot_info(s, &info) == 0) {
+			syn_model_handle_t h;
+			bool resident =
+				(syn_model_get_by_name(info.name, &h) == 0);
+
 			shell_print(sh, "slot %u: '%s' %u bytes crc 0x%08x "
-				    "at 0x%08x", s, info.name,
+				    "at 0x%08x%s", s, info.name,
 				    info.flash_size, info.crc32,
-				    info.flash_offset);
+				    info.flash_offset,
+				    resident ? " (resident)" : "");
 		} else {
 			shell_print(sh, "slot %u: empty", s);
 		}
 	}
+	return 0;
+}
+
+/* syn store activate <slot> - hot-swap the active model by slot ID */
+static int cmd_store_activate(const struct shell *sh, size_t argc,
+			      char **argv)
+{
+	if (argc < 2) {
+		shell_error(sh, "Usage: syn store activate <slot>");
+		return -EINVAL;
+	}
+	if (!syn_store_ready()) {
+		shell_error(sh, "model store not initialized");
+		return -ENODEV;
+	}
+
+	uint8_t slot = (uint8_t)strtoul(argv[1], NULL, 0);
+	int ret = syn_store_activate(slot);
+
+	if (ret == -EALREADY) {
+		shell_print(sh, "slot %u is already active", slot);
+		return 0;
+	}
+	if (ret != 0) {
+		shell_error(sh, "activate slot %u failed: %d", slot, ret);
+		return ret;
+	}
+	shell_print(sh, "slot %u active (gen %u); previous slot %u stays "
+		    "resident", slot, syn_store_generation(),
+		    syn_store_prev_active_slot());
 	return 0;
 }
 
@@ -1409,13 +1481,33 @@ static int cmd_dma_probe(const struct shell *sh, size_t argc, char **argv)
 }
 #endif /* CONFIG_SOC_SERIES_MCXNX4X */
 
+#ifdef CONFIG_SYNAPTIC_DMA_ARENA_PROBE
+/* Phase 6.3 bench diagnostics, defined in the eDMA HAL */
+int syn_dma_arena_probe(void);
+
+static int cmd_dma_arena(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Arena eDMA experiments (output via printk; "
+		    "resets the ephemeral arena)");
+	return syn_dma_arena_probe();
+}
+#endif /* CONFIG_SYNAPTIC_DMA_ARENA_PROBE */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_dma,
 	SHELL_CMD_ARG(bench, NULL,
 		      "Zero-copy ingest vs CPU copy: syn dma bench "
-		      "[frames]", cmd_dma_bench, 1, 1),
+		      "[frames] [arena|static]", cmd_dma_bench, 1, 2),
 #ifdef CONFIG_SOC_SERIES_MCXNX4X
 	SHELL_CMD(probe, NULL, "eDMA bring-up probe: 3 transfers + regs",
 		  cmd_dma_probe),
+#endif
+#ifdef CONFIG_SYNAPTIC_DMA_ARENA_PROBE
+	SHELL_CMD(arena, NULL,
+		  "Arena eDMA reachability experiments (canary+timeout)",
+		  cmd_dma_arena),
 #endif
 	SHELL_SUBCMD_SET_END
 );
@@ -1450,6 +1542,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_ipc,
 #ifdef CONFIG_SYNAPTIC_OTA
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_store,
 	SHELL_CMD(status, NULL, "Show model store state", cmd_store_status),
+	SHELL_CMD_ARG(activate, NULL,
+		      "Hot-swap the active model: syn store activate <slot>",
+		      cmd_store_activate, 2, 0),
 	SHELL_SUBCMD_SET_END
 );
 

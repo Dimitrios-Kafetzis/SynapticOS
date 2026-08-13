@@ -13,6 +13,8 @@
 #define SYNAPTIC_SYN_INFER_INTERNAL_H_
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <synaptic/syn_model.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +22,13 @@ extern "C" {
 
 void syn_infer_quiesce(void);
 void syn_infer_release(void);
+
+/** true while any SUSPENDED (layer-preempted) job references the
+ * model - its pipeline input and payload must stay valid, so
+ * unload/unregister/eviction is refused until it resumes or is
+ * cancelled (quiesce-gap closure, Phase 6.4).
+ */
+bool syn_infer_model_suspended(syn_model_handle_t model);
 
 /** Scheduler counters (Phase 5.1: deadline dispatch + preemption). */
 typedef struct {

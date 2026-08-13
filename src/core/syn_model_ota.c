@@ -183,6 +183,18 @@ int syn_ota_begin(const char *model_name, size_t total_size)
 	/* bank 1 flash work starts here: quiesce CPU1 first */
 	cpu1_park();
 
+	/* Evict the slot's resident occupant and commit it unoccupied
+	 * BEFORE erasing, so a power loss mid-transfer can never leave
+	 * a registry record pointing at erased flash. Refused (-EBUSY)
+	 * while the occupant still has a suspended layered job.
+	 */
+	int eret = syn_store_begin_staging(slot);
+
+	if (eret != 0) {
+		k_mutex_unlock(&ota_lock);
+		return enter_error(eret);
+	}
+
 	const syn_flash_port_t *port = syn_store_port();
 	uint32_t sector = port->sector_size;
 	uint32_t erase_len = (ota.total_size + sector - 1U) / sector * sector;

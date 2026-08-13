@@ -670,3 +670,67 @@ ZTEST(syn_layer_preempt_suite, test_cancel_suspended)
 	syn_pipeline_destroy(pr);
 	syn_mem_reset_ephemeral();
 }
+
+/** Quiesce-gap closure (Phase 6.4): while a job sits SUSPENDED, the
+ * model it references refuses residency changes with -EBUSY instead
+ * of leaving the job dangling; the refusal lifts once the job
+ * drains.
+ */
+ZTEST(syn_layer_preempt_suite, test_unregister_refused_while_suspended)
+{
+	syn_pipeline_t *pn = make_pipe("qgap_n");
+	syn_pipeline_t *pr = make_pipe("qgap_r");
+
+	syn_infer_params_t normal_params = {
+		.priority = SYN_PRIORITY_NORMAL,
+		.preemptible = true,
+	};
+	syn_job_id_t jn = syn_infer_submit(pn, &tensor_a, &normal_params);
+
+	zassert_not_equal(jn, SYN_JOB_INVALID, "NORMAL submit failed");
+	k_msleep(8);
+
+	syn_infer_params_t rt_params = {
+		.priority = SYN_PRIORITY_REALTIME,
+	};
+	syn_job_id_t jr = syn_infer_submit(pr, &tensor_b, &rt_params);
+
+	zassert_not_equal(jr, SYN_JOB_INVALID, "RT submit failed");
+
+	/* NORMAL now sits SUSPENDED while RT runs (~40 ms) */
+	k_msleep(10);
+
+	zassert_equal(syn_model_unregister(lp_model), -EBUSY,
+		      "unregister must be refused while a job is suspended");
+
+	zassert_equal(syn_infer_wait(jr, 5000), 0, "RT wait failed");
+	zassert_equal(syn_infer_wait(jn, 5000), 0, "NORMAL wait failed");
+
+	/* consume the results: job slots recycle via get_result */
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(jr, &r), 0, "RT result failed");
+	zassert_equal(syn_infer_get_result(jn, &r), 0,
+		      "NORMAL result failed");
+
+	/* drained: the refusal lifts. Unregister for real, then put
+	 * the suite model back for whatever test runs next.
+	 */
+	zassert_ok(syn_model_unregister(lp_model),
+		   "unregister must succeed once drained");
+
+	syn_model_info_t info = {0};
+
+	strncpy(info.name, "layered_test", sizeof(info.name) - 1);
+	strncpy(info.version, "1.0.0", sizeof(info.version) - 1);
+	info.input_size = LP_INPUT_SIZE;
+	info.output_size = LP_OUTPUT_SIZE;
+	info.input_dtype = SYN_NPU_DTYPE_INT8;
+	info.output_dtype = SYN_NPU_DTYPE_INT8;
+	zassert_equal(syn_model_register(&info, &lp_model), 0,
+		      "model re-register failed");
+
+	syn_pipeline_destroy(pn);
+	syn_pipeline_destroy(pr);
+	syn_mem_reset_ephemeral();
+}

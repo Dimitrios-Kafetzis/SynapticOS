@@ -25,6 +25,11 @@ LOG_MODULE_REGISTER(neutron_hello, LOG_LEVEL_INF);
 #define INPUT_C 3
 #define INPUT_SIZE (INPUT_H * INPUT_W * INPUT_C)
 #define OUTPUT_CLASSES 10
+/* The Neutron-converted graph pads the NPU data output to 12 lanes;
+ * the on-CPU SLICE that trims it back to 10 is not part of the NPU
+ * subgraph, so the raw NPU output is what arrives here.
+ */
+#define NPU_OUTPUT_SIZE 12
 #define NUM_RUNS 20
 
 int main(void)
@@ -44,7 +49,7 @@ int main(void)
 	strncpy(model_info.name, "resnet_cifar10", sizeof(model_info.name));
 	strncpy(model_info.version, "1.0.0", sizeof(model_info.version));
 	model_info.input_size = INPUT_SIZE;
-	model_info.output_size = OUTPUT_CLASSES;
+	model_info.output_size = NPU_OUTPUT_SIZE;
 	model_info.flash_size = sizeof(model_blob);
 	model_info.sram_required = 4096;
 	model_info.input_dtype = SYN_NPU_DTYPE_INT8;
@@ -84,7 +89,7 @@ int main(void)
 		data[i] = (int8_t)((int)((i * 7U + 13U) & 0xFF) - 128);
 	}
 
-	int8_t output_buf[OUTPUT_CLASSES];
+	int8_t output_buf[NPU_OUTPUT_SIZE];
 	uint32_t lat_min = UINT32_MAX, lat_max = 0, lat_sum = 0;
 	size_t output_size = 0;
 
@@ -119,14 +124,16 @@ int main(void)
 		LOG_INF("  class %u: %d", (unsigned)i, output_buf[i]);
 	}
 
+	/* Rank only the real classes; lanes 10..11 are converter pad. */
+	size_t rank_size = MIN(output_size, (size_t)OUTPUT_CLASSES);
 	uint32_t top_class = 0;
 
-	ret = syn_hal_dsp_argmax(output_buf, output_size, &top_class);
+	ret = syn_hal_dsp_argmax(output_buf, rank_size, &top_class);
 	if (ret != 0) {
 		int8_t max_val = output_buf[0];
 
 		top_class = 0;
-		for (size_t i = 1; i < output_size; i++) {
+		for (size_t i = 1; i < rank_size; i++) {
 			if (output_buf[i] > max_val) {
 				max_val = output_buf[i];
 				top_class = i;

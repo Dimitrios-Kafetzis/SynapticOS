@@ -23,9 +23,11 @@ LOG_MODULE_REGISTER(syn_model, CONFIG_SYNAPTIC_LOG_LEVEL);
 #include "syn_infer_internal.h"
 #define infer_quiesce() syn_infer_quiesce()
 #define infer_release() syn_infer_release()
+#define infer_model_suspended(h) syn_infer_model_suspended(h)
 #else
 #define infer_quiesce() do {} while (0)
 #define infer_release() do {} while (0)
+#define infer_model_suspended(h) false
 #endif
 
 /* Serializes NPU residency changes (load/swap); dispatch of queued
@@ -99,6 +101,15 @@ int syn_model_unregister(syn_model_handle_t handle)
 
 	if (idx < 0 || !slots[idx].active) {
 		return -EINVAL;
+	}
+	if (infer_model_suspended(handle)) {
+		/* a suspended layered job still references this model's
+		 * pipeline input and payload (quiesce-gap closure: refuse
+		 * deterministically instead of dangling it)
+		 */
+		LOG_WRN("'%s' has a suspended job: unregister refused",
+			slots[idx].info.name);
+		return -EBUSY;
 	}
 
 	if (slots[idx].loaded) {
@@ -226,6 +237,11 @@ int syn_model_unload(syn_model_handle_t handle)
 	}
 	if (!slots[idx].loaded) {
 		return -EALREADY;
+	}
+	if (infer_model_suspended(handle)) {
+		LOG_WRN("'%s' has a suspended job: unload refused",
+			slots[idx].info.name);
+		return -EBUSY;
 	}
 
 	slots[idx].loaded = false;

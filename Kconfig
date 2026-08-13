@@ -208,6 +208,18 @@ config SYNAPTIC_MODEL_STORE
       the CPU1 image reserve; on QEMU a RAM-backed port emulates
       the flash so the logic is fully unit-testable.
 
+config SYNAPTIC_STORE_MAX_SLOTS
+    int "Maximum model slots the store can manage"
+    depends on SYNAPTIC_MODEL_STORE
+    default 4
+    range 2 8
+    help
+      Upper bound on the number of flash model slots (the actual
+      count comes from the layout an application passes to
+      syn_store_init, which may be smaller). Bounds the RAM record
+      table and the registry image; the occupied bitmask caps this
+      at 8. The FRDM partition map defines 2 slots.
+
 config SYNAPTIC_STORE_AUTO_INIT
     bool "Initialize the model store automatically at boot"
     depends on SYNAPTIC_MODEL_STORE
@@ -275,6 +287,21 @@ config SYNAPTIC_SHELL
     help
       Add shell commands for model management, profiling,
       and runtime inspection.
+
+config SYNAPTIC_DMA_ARENA_PROBE
+    bool "Arena eDMA reachability probe (bench diagnostics)"
+    depends on SOC_SERIES_MCXNX4X && DMA && SYNAPTIC_SHELL
+    default n
+    help
+      Add 'syn dma arena', a canary-plus-timeout experiment harness
+      that probes whether the tensor arena is reachable by eDMA
+      transfers under different bus security attributes (per-channel
+      CH_SBR security bit, AHBSC master security level, MPC memory
+      rules). The SoC fails ineligible eDMA transfers silently, so
+      every attempt is verified against destination canary bytes
+      with a bounded wait and the AHBSC violation capture is dumped.
+      Board bring-up diagnostics only; keep disabled in production
+      builds.
 
 config SYNAPTIC_LOG_LEVEL
     int "SynapticOS log level"
