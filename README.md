@@ -220,7 +220,7 @@ SynapticOS is developed in six phases, each building on the previous:
 | **3. Dual-Core & IPC** | Asymmetric multiprocessing, lock-free shared-memory IPC, cross-core inference offload, MPU protection, CPU1 board port | **v0.3.0** ✓ |
 | **4. Model Lifecycle** | Flash-backed model store, power-loss-safe A/B OTA updates, hot-swap, dual-core-safe flash map, packaging tools | **v0.4.0** ✓ |
 | **5. Production Hardening** | Deadline dispatch + layer preemption, activation planning, watchdog + fault recovery, zero-copy DMA ingest, binary OTA transport, coverage, 11k-inference soak | **v0.5.0** ✓ |
-| 6. Ecosystem & Tooling | Model packaging tools, docs site, SDK, v1.0 release | v1.0.0 |
+| 6. Ecosystem & Tooling | Real eIQ Neutron NPU inference, NPU residency contract, multi-model store with staging eviction, metrics re-measure, out-of-tree SDK template, community docs, v1.0 release | v1.0.0 (in progress) |
 
 ## Documentation
 
@@ -229,16 +229,17 @@ SynapticOS is developed in six phases, each building on the previous:
 | [Ubuntu Environment Setup](docs/01-ubuntu-setup.md) | Full setup guide for development on Ubuntu 24.04 |
 | [Project Setup & First Build](docs/02-project-setup.md) | West workspace initialization and first build |
 | [Architecture Specification](docs/architecture.md) | System design, data flow, and component overview |
+| [Application Template](template/README.md) | Build your own app against SynapticOS out-of-tree, from a fresh workspace to a running QEMU/FRDM build |
 
 ## Contributing
 
-SynapticOS is in active early development. Community contributions will open in an upcoming phase with proper guidelines, issue templates, and a contributor guide.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules (Apache-2.0, `-Werror`, conventional commits, tests with every change, honest measured results). Issues and pull requests use the repository templates; PRs target the `dev` branch.
 
-**In the meantime, you can:**
+**Ways in:**
 
-- Star the repo to follow progress
-- Open an issue for bugs, questions, or feature ideas
-- Watch releases for milestone announcements
+- Build something on top: start from the [application template](template/README.md) — no fork needed
+- Open an issue for bugs, questions, or feature ideas (bug reports ask for the target, commit, and a serial log)
+- Star the repo and watch releases for milestone announcements
 
 ## License
 

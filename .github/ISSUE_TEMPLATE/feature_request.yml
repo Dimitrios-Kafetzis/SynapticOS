@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose an addition or change to the runtime, tooling, or docs
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, or what costs more than it should? Concrete use cases beat abstractions.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to see. If it touches the public API (include/synaptic/), note that it is versioned and frozen between releases.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Target constraints
+      description: Anything relevant about footprint or hardware (QEMU's 64 KB RAM, single-residency NPU, flash map, dual-core timing).

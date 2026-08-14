@@ -1,0 +1,63 @@
+name: Bug report
+description: Something misbehaves on QEMU, the FRDM-MCXN947, or in the tooling
+labels: [bug]
+body:
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target
+      options:
+        - QEMU (qemu_cortex_m3)
+        - FRDM-MCXN947 (CPU0)
+        - FRDM-MCXN947 (dual-core)
+        - FRDM-MCXN947 (Neutron NPU build)
+        - Host tooling (tools/*.py)
+        - Out-of-tree app (template/ workspace)
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "`git rev-parse --short HEAD` of the synaptic-os tree you built"
+      placeholder: 9996330
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include exact error output where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Build command (board, sample, extra conf) and the shell commands or code path that trigger it.
+      placeholder: |
+        west build -b qemu_cortex_m3 synaptic-os/samples/hello_inference --pristine
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Serial log / twister output
+      description: Boot log and the failing window if you have one. For board issues include the `syn version` and, if relevant, `syn store status` output.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem
+          required: true
+        - label: For suspected security issues in the OTA/update path I am using GitHub's private vulnerability reporting instead of this public issue
+          required: true
