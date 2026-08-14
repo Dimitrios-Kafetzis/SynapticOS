@@ -607,11 +607,26 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 #endif
 
 	if (src == NULL) {
+		/* The bench buffers live in the shared ephemeral arena
+		 * and scratch pool, which app inference ticks reset
+		 * between inferences - on the loaded dual image that
+		 * clobbered the bench canaries (S7 row 9 artifact).
+		 * Pause dispatch for the bench: new ticks block inside
+		 * run_sync (its 5 s wait bounds the tolerated bench
+		 * length), and the settle sleep lets a tick that just
+		 * completed finish its ephemeral reset before the
+		 * buffers are placed.
+		 */
+		syn_infer_quiesce();
+		k_sleep(K_MSEC(100));
+		arena_bufs = true;
+
 		src = syn_mem_scratch_acquire(DMA_BENCH_FRAME);
 
 		if (src == NULL) {
 			shell_error(sh, "scratch pool too small for a "
 				    "%u-byte frame", DMA_BENCH_FRAME);
+			syn_infer_release();
 			return -ENOMEM;
 		}
 
@@ -628,12 +643,12 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 				    "buffers", DMA_BENCH_FRAME);
 			syn_mem_scratch_release(src);
 			syn_mem_reset_ephemeral();
+			syn_infer_release();
 			return -ENOMEM;
 		}
 
 		dst0 = b0->data;
 		dst1 = b1->data;
-		arena_bufs = true;
 	}
 
 	/* Static frame body under the per-frame stamp */
@@ -674,6 +689,7 @@ static int cmd_dma_bench(const struct shell *sh, size_t argc, char **argv)
 	if (arena_bufs) {
 		syn_mem_scratch_release(src);
 		syn_mem_reset_ephemeral();
+		syn_infer_release();
 	}
 
 	if (ret != 0) {
