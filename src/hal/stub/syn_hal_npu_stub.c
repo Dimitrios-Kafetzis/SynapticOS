@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "../common/syn_npu_layered.h"
+#include "../common/syn_hal_npu_internal.h"
 
 LOG_MODULE_REGISTER(syn_hal_npu_stub, CONFIG_SYNAPTIC_LOG_LEVEL);
 
@@ -93,6 +94,23 @@ int syn_hal_npu_load_model(const uint8_t *model_data, size_t model_size)
 	syn_npu_layered_on_load(model_data, model_size);
 
 	LOG_INF("Model loaded: %zu bytes", model_size);
+	return 0;
+}
+
+int syn_hal_npu_unload_model(void)
+{
+	if (!stub.initialized) {
+		return -EPERM;
+	}
+	if (stub.state == SYN_NPU_STATE_BUSY) {
+		return -EBUSY;
+	}
+
+	stub.model_loaded = false;
+	stub.model_size = 0;
+	syn_npu_layered_on_load(NULL, 0);
+
+	LOG_DBG("Resident model dropped");
 	return 0;
 }
 

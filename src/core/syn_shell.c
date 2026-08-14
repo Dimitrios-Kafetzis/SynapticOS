@@ -16,6 +16,7 @@
 #include "../hal/common/syn_dsp_soft.h"
 #include "syn_mem_internal.h"
 #include "syn_infer_internal.h"
+#include "syn_model_internal.h"
 
 #ifdef CONFIG_SYNAPTIC_MPU_PROTECT
 #include "syn_mpu_internal.h"
@@ -726,6 +727,16 @@ static int cmd_infer_run(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
+	if (!syn_model_is_loaded(handle)) {
+		/* Residency contract (S8): never stub-run a model that
+		 * is not loaded - S7 measured 1353 us fake vs 6581 us
+		 * real on the same name.
+		 */
+		shell_error(sh, "Model '%s' is not loaded; run "
+			    "'syn model load %s' first", argv[1], argv[1]);
+		return -EPERM;
+	}
+
 	syn_model_info_t info;
 
 	syn_model_get_info(handle, &info);
@@ -823,6 +834,14 @@ static int cmd_infer_stats(const struct shell *sh, size_t argc, char **argv)
 	if (st.preemptions > 0U) {
 		shell_print(sh, "Context save: last %u us, max %u us",
 			    st.last_save_us, st.max_save_us);
+	}
+
+	uint32_t swaps, swap_us;
+
+	syn_model_residency_stats(&swaps, &swap_us);
+	if (swaps > 0U) {
+		shell_print(sh, "Residency swaps: %u (last %u us)",
+			    swaps, swap_us);
 	}
 	return 0;
 }

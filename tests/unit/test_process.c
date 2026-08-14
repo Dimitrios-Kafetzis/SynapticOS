@@ -54,6 +54,14 @@ static void *proc_suite_setup(void)
 		zassert_equal(syn_model_register(&info, &proc_model), 0,
 			      "Model registration failed");
 	}
+
+	/* S8 residency contract: registry load makes the model eligible
+	 * to run (no data attached; the HAL blob above stays resident).
+	 */
+	int lret = syn_model_load(proc_model);
+
+	zassert_true(lret == 0 || lret == -EALREADY,
+		     "model load failed: %d", lret);
 	return NULL;
 }
 

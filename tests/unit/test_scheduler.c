@@ -87,6 +87,15 @@ static void *sched_suite_setup(void)
 		zassert_equal(syn_model_register(&info, &sched_model), 0,
 			      "Model registration failed");
 	}
+
+	/* S8 residency contract: jobs are refused unless the model is
+	 * loaded. The suite drives the HAL blob directly above, so the
+	 * registry load is eligibility-only (no data attached).
+	 */
+	int lret = syn_model_load(sched_model);
+
+	zassert_true(lret == 0 || lret == -EALREADY,
+		     "model load failed: %d", lret);
 	return NULL;
 }
 

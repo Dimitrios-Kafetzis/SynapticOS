@@ -18,6 +18,7 @@ LOG_MODULE_REGISTER(syn_model, CONFIG_SYNAPTIC_LOG_LEVEL);
 #include <string.h>
 
 #include "syn_model_internal.h"
+#include "../hal/common/syn_hal_npu_internal.h"
 
 #ifdef CONFIG_SYNAPTIC
 #include "syn_infer_internal.h"
@@ -49,6 +50,25 @@ struct model_slot {
 };
 
 static struct model_slot slots[CONFIG_SYNAPTIC_MAX_MODELS];
+
+/* Data blob currently resident in the (single-residency) NPU HAL,
+ * NULL when none or unknown. Registered models without attached data
+ * are not tracked: their owners drive syn_hal_npu_load_model()
+ * directly (test rigs), and the registry leaves that residency alone.
+ *
+ * Concurrency: written by shell/OTA-context residency changers only
+ * after infer_quiesce() has drained the running job, and by the
+ * scheduler thread only while it is executing a job (see
+ * syn_model_ensure_resident) - the quiesce protocol makes the two
+ * mutually exclusive.
+ */
+static const uint8_t *resident_data;
+
+/* On-demand residency swap accounting (S8: honest overhead of the
+ * single-residency NPU in mixed-model pipelines).
+ */
+static uint32_t residency_swaps;
+static uint32_t residency_last_us;
 
 /* Handle is 1-based index: handle = slot_index + 1 */
 static inline int handle_to_index(syn_model_handle_t handle)
@@ -171,8 +191,11 @@ int syn_model_list(syn_model_handle_t *handles, uint8_t *count, uint8_t max)
 	return 0;
 }
 
-/* Residency-gate-free core of load; callers hold residency_gate. */
-static int model_do_load(int idx)
+/* Make slot @p idx's data the HAL-resident model (CRC-gated). Jobs
+ * must be drained or excluded by the caller. No-op for slots without
+ * attached data.
+ */
+static int model_hal_load(int idx)
 {
 	/* If model data is available, load into NPU HAL */
 	if (slots[idx].model_data != NULL && slots[idx].model_data_size > 0) {
@@ -200,6 +223,20 @@ static int model_do_load(int idx)
 				slots[idx].info.name, ret);
 			return ret;
 		}
+
+		resident_data = slots[idx].model_data;
+	}
+
+	return 0;
+}
+
+/* Residency-gate-free core of load; callers hold residency_gate. */
+static int model_do_load(int idx)
+{
+	int ret = model_hal_load(idx);
+
+	if (ret != 0) {
+		return ret;
 	}
 
 	slots[idx].loaded = true;
@@ -245,8 +282,76 @@ int syn_model_unload(syn_model_handle_t handle)
 	}
 
 	slots[idx].loaded = false;
+
+	/* S7 board finding: unload must also release the HAL residency,
+	 * or (on Neutron) the prepared model's input-size gate keeps
+	 * failing every other invoke until reboot. Queued jobs on this
+	 * model are refused at dispatch (see syn_model_ensure_resident).
+	 */
+	if (slots[idx].model_data != NULL &&
+	    slots[idx].model_data == resident_data) {
+		k_mutex_lock(&residency_gate, K_FOREVER);
+		infer_quiesce();
+		(void)syn_hal_npu_unload_model();
+		resident_data = NULL;
+		infer_release();
+		k_mutex_unlock(&residency_gate);
+	}
+
 	LOG_INF("Unloaded model '%s'", slots[idx].info.name);
 	return 0;
+}
+
+int syn_model_ensure_resident(syn_model_handle_t handle)
+{
+	int idx = handle_to_index(handle);
+
+	if (idx < 0 || !slots[idx].active) {
+		return -EINVAL;
+	}
+	if (!slots[idx].loaded) {
+		/* Contract (S8): jobs never run against a model that is
+		 * not loaded - the silent stub fallback S7 measured
+		 * (1353 us fake vs 6581 us real) is not acceptable.
+		 */
+		LOG_ERR("'%s' is not loaded: inference refused",
+			slots[idx].info.name);
+		return -ENOEXEC;
+	}
+	if (slots[idx].model_data == NULL ||
+	    slots[idx].model_data == resident_data) {
+		return 0;
+	}
+
+	/* Single-residency NPU, different model resident: swap on
+	 * demand. Runs only on the scheduler thread while it owns the
+	 * running job; shell/OTA residency changers are excluded by the
+	 * quiesce protocol (they drain this job before touching the
+	 * HAL), so no lock is taken here - taking residency_gate would
+	 * deadlock against a changer already waiting in quiesce.
+	 */
+	uint32_t t0 = k_cycle_get_32();
+	int ret = model_hal_load(idx);
+
+	if (ret != 0) {
+		return ret;
+	}
+
+	residency_last_us = k_cyc_to_us_ceil32(k_cycle_get_32() - t0);
+	residency_swaps++;
+	LOG_DBG("Residency swap to '%s' in %u us",
+		slots[idx].info.name, residency_last_us);
+	return 0;
+}
+
+void syn_model_residency_stats(uint32_t *swaps, uint32_t *last_us)
+{
+	if (swaps != NULL) {
+		*swaps = residency_swaps;
+	}
+	if (last_us != NULL) {
+		*last_us = residency_last_us;
+	}
 }
 
 bool syn_model_is_loaded(syn_model_handle_t handle)
@@ -285,6 +390,7 @@ void syn_model_reset_all(void)
 		}
 	}
 	memset(slots, 0, sizeof(slots));
+	resident_data = NULL;
 }
 
 int syn_model_swap(syn_model_handle_t old_handle, syn_model_handle_t new_handle)

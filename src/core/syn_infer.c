@@ -51,6 +51,7 @@ LOG_MODULE_REGISTER(syn_infer, CONFIG_SYNAPTIC_LOG_LEVEL);
 
 #include "syn_prof_internal.h"
 #include "syn_infer_internal.h"
+#include "syn_model_internal.h"
 #include "syn_health.h"
 
 #ifdef CONFIG_SYNAPTIC_LAYER_EXEC
@@ -626,6 +627,25 @@ static int execute_pipeline(struct infer_job *job)
 	const syn_tensor_t *cur = job->input;
 	bool npu_marked = false;
 	uint8_t first_stage = 0;
+	bool resuming = false;
+
+#ifdef CONFIG_SYNAPTIC_LAYER_EXEC
+	resuming = job->resuming;
+#endif
+
+	/* Residency contract (S8): a job never runs against a model
+	 * that is not loaded (refused, -ENOEXEC), and the loaded model
+	 * is made HAL-resident before the invoke, swapping the
+	 * single-residency NPU on demand. A resuming layered job is
+	 * exempt: it replays from its parked context, which carries its
+	 * own model pointer.
+	 */
+	if (!resuming) {
+		ret = syn_model_ensure_resident(pipe->model);
+		if (ret != 0) {
+			return ret;
+		}
+	}
 
 #ifdef CONFIG_SYNAPTIC_LAYER_EXEC
 	if (job->resuming) {
@@ -945,6 +965,12 @@ syn_job_id_t syn_infer_submit(syn_pipeline_t *pipe,
 		return SYN_JOB_INVALID;
 	}
 
+	/* No loaded-ness check here: submit stays permissive so a job
+	 * may be queued against a model that is about to be swapped in
+	 * (the store hot-swap pattern). Eligibility is evaluated when
+	 * the job actually runs - see syn_model_ensure_resident() in
+	 * execute_pipeline().
+	 */
 	k_mutex_lock(&infer_lock, K_FOREVER);
 
 	/* Count active jobs against the concurrency limit */
@@ -1145,6 +1171,18 @@ int syn_infer_run_sync(syn_model_handle_t model,
 {
 	if (input == NULL || output == NULL) {
 		return -EINVAL;
+	}
+	syn_model_info_t loaded_chk;
+
+	if (syn_model_get_info(model, &loaded_chk) == 0 &&
+	    !syn_model_is_loaded(model)) {
+		/* Registered but not loaded: refuse loudly instead of
+		 * silently running whatever model is NPU-resident (the
+		 * S7 stub-numbers trap). Unregistered handles fall
+		 * through to the usual -ENOENT below.
+		 */
+		LOG_ERR("Model %u is not loaded: inference refused", model);
+		return -ENOEXEC;
 	}
 
 	syn_pipeline_t *pipe = syn_pipeline_create("run_sync");
