@@ -23,8 +23,7 @@
 #
 # Usage: from the west workspace root (the parent of synaptic-os/):
 #   ./synaptic-os/tools/syn_coverage.sh
-# Output: coverage-report/ (index.html + summary.txt) in the
-# workspace root.
+# Output: synaptic-os/coverage-report/ (index.html + summary.txt).
 
 set -euo pipefail
 
@@ -41,14 +40,25 @@ GCOV="${GCOV:-$(find "$HOME" -maxdepth 4 -path '*arm-zephyr-eabi/bin/arm-zephyr-
 
 run_app() {
     local app="$1"
-    local bdir="$WS/build-cov-$app"
+    local tag="$2"
+    local files="$3"    # empty = the app's coverage.conf value
+    local bdir="$WS/synaptic-os/builds/cov-$tag"
     local log="$bdir/qemu-console.log"
 
-    echo "=== $app: build (instrumented) ==="
+    echo "=== $tag: build (instrumented) ==="
+    # Instrumenting ALL of src/core stopped fitting the 64 KB QEMU
+    # target as the tree grew (Phase 6: overflow by ~9 KB flash /
+    # ~1.4 KB RAM), so the unit app runs TWICE with disjoint
+    # file subsets; gcovr merges the passes. Each pass runs the
+    # full suite, so per-file numbers are unaffected.
+    local extra=(-DEXTRA_CONF_FILE=coverage.conf)
+    if [ -n "$files" ]; then
+        extra+=("-DCONFIG_SYNAPTIC_COVERAGE_FILES=\"$files\"")
+    fi
     west build -b qemu_cortex_m3 "synaptic-os/tests/$app" --pristine \
-        -d "$bdir" -- -DEXTRA_CONF_FILE=coverage.conf
+        -d "$bdir" -- "${extra[@]}"
 
-    echo "=== $app: run under QEMU ==="
+    echo "=== $tag: run under QEMU ==="
     timeout 240 "$QEMU" -cpu cortex-m3 -machine lm3s6965evb \
         -display none -monitor none -serial stdio -net none \
         -icount shift=6,align=off,sleep=off -rtc clock=vm \
@@ -70,19 +80,24 @@ run_app() {
         exit 1
     }
 
-    echo "=== $app: harvest gcda ==="
+    echo "=== $tag: harvest gcda ==="
     python3 zephyr/scripts/gen_gcov_files.py -i "$log"
 }
 
-run_app unit
-run_app unit_store
+run_app unit unit-a "syn_infer.c syn_mem.c syn_model.c"
+run_app unit unit-b "syn_init.c syn_prof.c syn_synn.c syn_ipc_ring.c syn_drain_gate.c syn_ingest.c syn_health.c"
+run_app unit_store store-a "syn_model_store.c"
+run_app unit_store store-b "syn_model_ota.c syn_flash_port_ram.c syn_flash_port_mcx.c"
 
 echo "=== merge + report ==="
-mkdir -p "$WS/coverage-report"
+mkdir -p "$WS/synaptic-os/coverage-report"
 gcovr --root synaptic-os --filter 'synaptic-os/src/core/' \
     --gcov-executable "$GCOV" \
-    "$WS/build-cov-unit" "$WS/build-cov-unit_store" \
-    --html-details "$WS/coverage-report/index.html" \
-    --print-summary | tee "$WS/coverage-report/summary.txt"
+    "$WS/synaptic-os/builds/cov-unit-a" \
+    "$WS/synaptic-os/builds/cov-unit-b" \
+    "$WS/synaptic-os/builds/cov-store-a" \
+    "$WS/synaptic-os/builds/cov-store-b" \
+    --html-details "$WS/synaptic-os/coverage-report/index.html" \
+    --print-summary | tee "$WS/synaptic-os/coverage-report/summary.txt"
 
-echo "report: $WS/coverage-report/index.html"
+echo "report: $WS/synaptic-os/coverage-report/index.html"
