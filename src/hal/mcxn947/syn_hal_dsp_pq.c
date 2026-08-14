@@ -53,9 +53,22 @@ static bool pq_fft_gain_is_1_over_n;
 static float pq_fft_gain;      /* Measured raw gain at calibration N  */
 static uint32_t pq_fft_cal_n;  /* Calibration length                  */
 
+/* S10 PQ pass: PQ_SetConfig rewrites the whole coprocessor config on
+ * every operation, which is pure overhead for back-to-back ops of
+ * the same kind (bench: 200 matmuls = 199 redundant rewrites). Cache
+ * the applied config; only this HAL touches POWERQUAD. Guarded by
+ * pq_lock like every engine access.
+ */
+enum pq_cfg { PQ_CFG_NONE, PQ_CFG_FIXED32, PQ_CFG_Q15 };
+static enum pq_cfg pq_cfg_cur;
+
 static void pq_config_fixed32(void)
 {
 	pq_config_t cfg;
+
+	if (pq_cfg_cur == PQ_CFG_FIXED32) {
+		return;
+	}
 
 	PQ_GetDefaultConfig(&cfg);
 	cfg.inputAFormat = kPQ_32Bit;
@@ -64,11 +77,16 @@ static void pq_config_fixed32(void)
 	cfg.tmpFormat = kPQ_32Bit;
 	cfg.machineFormat = kPQ_32Bit;
 	PQ_SetConfig(POWERQUAD, &cfg);
+	pq_cfg_cur = PQ_CFG_FIXED32;
 }
 
 static void pq_config_q15(void)
 {
 	pq_config_t cfg;
+
+	if (pq_cfg_cur == PQ_CFG_Q15) {
+		return;
+	}
 
 	PQ_GetDefaultConfig(&cfg);
 	cfg.inputAFormat = kPQ_16Bit;
@@ -78,6 +96,19 @@ static void pq_config_q15(void)
 	cfg.tmpFormat = kPQ_Float;
 	cfg.machineFormat = kPQ_Float;
 	PQ_SetConfig(POWERQUAD, &cfg);
+	pq_cfg_cur = PQ_CFG_Q15;
+}
+
+/* Round-to-nearest float->int32 without the lrintf libm call: the
+ * S10 profile showed 2*N lrintf calls dominating the FFT wrapper
+ * (they are function calls under -Os, ~one third of the per-op
+ * cost at N=256). Two float ops + a VCVT truncation inline instead;
+ * ties round away from zero, within the Q13 quantization the input
+ * staging already accepts.
+ */
+static inline int32_t pq_f32_to_i32(float x)
+{
+	return (int32_t)(x + (x >= 0.0f ? 0.5f : -0.5f));
 }
 
 /** Raw fixed-point CFFT of an impulse of amplitude `amp` at length
@@ -171,7 +202,7 @@ static int pq_fft_f32(const float *in, float *out, size_t len)
 	k_mutex_lock(&pq_lock, K_FOREVER);
 
 	for (size_t i = 0; i < len * 2; i++) {
-		pq_fft_buf_in[i] = (int32_t)lrintf(in[i] * scale);
+		pq_fft_buf_in[i] = pq_f32_to_i32(in[i] * scale);
 	}
 
 	pq_config_fixed32();

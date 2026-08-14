@@ -344,6 +344,13 @@ static int cmd_dsp_bench(const struct shell *sh, size_t argc, char **argv)
 
 	uint32_t t0, soft_us, hal_us;
 
+	/* Pause inference dispatch for the ~15 ms bench window (same
+	 * rationale as the dma bench): on a loaded image the app ticks
+	 * preempt both timing loops and squash the measured ratio
+	 * (S10: 1.93x contaminated vs the quiet-image reference).
+	 */
+	syn_infer_quiesce();
+
 	/* --- FFT: two-tone signal, N=256 complex points --- */
 	for (int i = 0; i < BENCH_FFT_N; i++) {
 		bench_fft_in[2 * i] =
@@ -444,6 +451,7 @@ static int cmd_dsp_bench(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "  max err: %d LSB", max_lsb);
 
+	syn_infer_release();
 	return 0;
 }
 
