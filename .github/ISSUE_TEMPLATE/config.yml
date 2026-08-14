@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue in the OTA / update path
+    url: https://github.com/Dimitrios-Kafetzis/SynapticOS/security/advisories/new
+    about: Use private vulnerability reporting instead of a public issue.

@@ -125,6 +125,15 @@ def main():
     name = args.name
     if name is None:
         name = SYNM_HDR.unpack_from(image, 0)[2].rstrip(b"\0").decode()
+    else:
+        # The device's OTA commit path compares the begin-name against
+        # the header name (S7 tripped this gate), so --name must also
+        # rewrite the header. The name field is bytes 8..40; the header
+        # CRC32 covers the payload only, so no recompute is needed.
+        raw = name.encode()
+        if len(raw) > 31:
+            raise SystemExit("error: name exceeds 31 bytes")
+        image = image[:8] + raw.ljust(32, b"\0") + image[40:]
 
     fd = open_port(args.port, args.baud)
     sh = Shell(fd, args.verbose)

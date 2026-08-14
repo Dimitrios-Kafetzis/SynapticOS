@@ -76,13 +76,14 @@ Most RTOS platforms treat AI inference as an afterthought &mdash; a library bolt
 | **Memory-Optimal Activation Planning** | DAG models with skip connections share one plan area laid out by a lifetime-based first-fit planner: 43% below the all-live peak on the 8-layer demo DAG, planned in 18 us on the board. |
 | **Health Monitoring & Fault Recovery** | Hardware watchdog (WWDT) fed only while every busy source is fresh &mdash; an induced CPU0 hang reboots clean in under 2 s. CPU1 heartbeat supervision parks and re-releases a hung second core (600 ms detect + 1.3 ms re-release, measured) without disturbing CPU0. |
 | **Zero-Copy DMA Ingest** | Double-buffered frame pump over the MCXN947 eDMA (software stub on QEMU): the CPU processes frame N in place while DMA lands frame N+1. +251% frame rate over CPU copy at 8 KB frames, 1000 frames with zero corruption, measured on the board. |
+| **PowerQuad DSP Offload** | Self-calibrating FFT and Q15 matmul on the MCXN947 PowerQuad with transparent per-operation software fallback. Measured on the board: 3.03&times; on 256-pt float FFT (132 us/op vs 403 us software), 1.72&times; on 16&times;16 Q15 matmul &mdash; honest numbers against the hard-FPU software kernels; the small-matrix path is overhead-bound by design. |
 | **Inference Profiling** | Cycle-accurate timing of each pipeline stage (preprocess, NPU, postprocess). Memory peak tracking and NPU utilization metrics. |
 | **Interactive Shell** | Inspect and drive the runtime over serial: `syn version`, `syn mem stats/dump`, `syn model list/info/load/unload`, `syn npu caps/plan`, `syn infer run/stats`, `syn prof last`, `syn ipc status/stats`, `syn health`, `syn dma bench`, `syn store status`, `syn ota begin/data/rawdata/done/activate/rollback` &mdash; with model-name tab completion. |
 | **Dual-Core Offload** | The AI runtime runs on CPU0; CPU1 requests inference as an OS service over lock-free shared-memory rings (15 us typical round-trip, measured on the board). Includes CPU1 boot orchestration with blank-bank fallback and an out-of-tree CPU1 board port for Zephyr 3.7. |
 | **Cross-Core Protection** | CPU0's MPU guards CPU1's RAM read-only, with fault containment (offending thread aborted, both cores continue). One-directional by silicon: the MCXN947's CPU1 has no MPU. |
 | **Dual-Target Support** | Same codebase builds and runs on real hardware (FRDM-MCXN947) and emulated targets (QEMU Cortex-M3) for CI-friendly development. |
 
-> **Measured honestly.** All inference figures to date run against the **stub NPU HAL** &mdash; every byte travels the real pipeline (UART &rarr; OTA engine &rarr; flash &rarr; CRC-gated load &rarr; serve), but no real network executes until the eIQ Neutron SDK invoke path lands (scoped for Phase 6 as an optional module). The OTA transport now streams raw binary over the 115200-baud shell: a 432 KB slot-max update lands in 38.88 s (11.1 KB/s &mdash; 2.06x the old hex transport and 98.7% of the line rate, so the original 10 s target needs a faster link, not better software).
+> **Measured honestly.** Real eIQ Neutron inference is live (optional `neutron` module, Phase 6): a 32&times;32&times;3 INT8 classifier runs in **6.6 ms** when resident and **17.1 ms** including the on-demand model swap the single-residency NPU needs in a mixed pipeline (prepare ~10.5 ms, CRC-gated), sustained at 10 FPS alongside two stub-model workloads and live dual-core serving with zero errors &mdash; worst observed tail 21.5 ms, which misses the 20 ms REALTIME target when a swap lands behind an in-flight job (keep the REALTIME model resident to hold 6.6 ms). Figures for the stub-model workloads (and all dual-core serving latencies) remain **stub-NPU-labeled** until a real 96&times;96 model is converted. The OTA transport streams raw binary over the 115200-baud shell: a 432 KB slot-max update lands in 38.88 s (11.1 KB/s &mdash; 2.06x the old hex transport and 98.7% of the line rate, so the original 10 s target needs a faster link, not better software).
 
 ## Target Hardware
 
@@ -219,7 +220,7 @@ SynapticOS is developed in six phases, each building on the previous:
 | **3. Dual-Core & IPC** | Asymmetric multiprocessing, lock-free shared-memory IPC, cross-core inference offload, MPU protection, CPU1 board port | **v0.3.0** ✓ |
 | **4. Model Lifecycle** | Flash-backed model store, power-loss-safe A/B OTA updates, hot-swap, dual-core-safe flash map, packaging tools | **v0.4.0** ✓ |
 | **5. Production Hardening** | Deadline dispatch + layer preemption, activation planning, watchdog + fault recovery, zero-copy DMA ingest, binary OTA transport, coverage, 11k-inference soak | **v0.5.0** ✓ |
-| 6. Ecosystem & Tooling | Model packaging tools, docs site, SDK, v1.0 release | v1.0.0 |
+| 6. Ecosystem & Tooling | Real eIQ Neutron NPU inference, NPU residency contract, multi-model store with staging eviction, metrics re-measure, out-of-tree SDK template, community docs, v1.0 release | v1.0.0 (in progress) |
 
 ## Documentation
 
@@ -228,16 +229,17 @@ SynapticOS is developed in six phases, each building on the previous:
 | [Ubuntu Environment Setup](docs/01-ubuntu-setup.md) | Full setup guide for development on Ubuntu 24.04 |
 | [Project Setup & First Build](docs/02-project-setup.md) | West workspace initialization and first build |
 | [Architecture Specification](docs/architecture.md) | System design, data flow, and component overview |
+| [Application Template](template/README.md) | Build your own app against SynapticOS out-of-tree, from a fresh workspace to a running QEMU/FRDM build |
 
 ## Contributing
 
-SynapticOS is in active early development. Community contributions will open in an upcoming phase with proper guidelines, issue templates, and a contributor guide.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules (Apache-2.0, `-Werror`, conventional commits, tests with every change, honest measured results). Issues and pull requests use the repository templates; PRs target the `dev` branch.
 
-**In the meantime, you can:**
+**Ways in:**
 
-- Star the repo to follow progress
-- Open an issue for bugs, questions, or feature ideas
-- Watch releases for milestone announcements
+- Build something on top: start from the [application template](template/README.md) — no fork needed
+- Open an issue for bugs, questions, or feature ideas (bug reports ask for the target, commit, and a serial log)
+- Star the repo and watch releases for milestone announcements
 
 ## License
 

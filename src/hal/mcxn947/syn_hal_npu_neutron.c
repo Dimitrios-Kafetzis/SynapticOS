@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "../common/syn_npu_layered.h"
+#include "../common/syn_hal_npu_internal.h"
 #include "syn_synn.h"
 
 #ifdef CONFIG_SYNAPTIC_NEUTRON
@@ -299,6 +300,32 @@ int syn_hal_npu_load_model(const uint8_t *model_data, size_t model_size)
 	syn_npu_layered_on_load(model_data, model_size);
 
 	LOG_INF("Model loaded: %zu bytes (stub inference)", model_size);
+	return 0;
+}
+
+int syn_hal_npu_unload_model(void)
+{
+	if (!npu.initialized) {
+		return -EPERM;
+	}
+	if (npu.state == SYN_NPU_STATE_BUSY) {
+		return -EBUSY;
+	}
+
+#ifdef CONFIG_SYNAPTIC_NEUTRON
+	/* neutron_unprepare clears the prepared flag even when the
+	 * driver reports an error, so the invoke gate is released
+	 * either way; the error is logged there.
+	 */
+	(void)neutron_unprepare();
+#endif
+
+	npu.model_loaded = false;
+	npu.model_data = NULL;
+	npu.model_size = 0;
+	syn_npu_layered_on_load(NULL, 0);
+
+	LOG_DBG("Resident model dropped");
 	return 0;
 }
 

@@ -13,6 +13,9 @@ firm up as the project approaches 1.0.
   on `dev`. Open pull requests against `dev`.
 - Warnings are errors (`-Werror`); a change that introduces any
   compiler warning does not merge.
+- Building an application ON TOP of SynapticOS rather than changing
+  it? Start from `template/` — an out-of-tree app workspace with its
+  own west manifest; you do not need to fork this repo.
 
 ## Code style
 
@@ -77,8 +80,9 @@ misses.
 - PRs that change public behavior update the matching docs
   (`README.md`, `CHANGELOG.md` under Unreleased).
 - CI equivalent today is the twister suite plus pristine builds of
-  the samples for both targets; run them locally before requesting
-  review.
+  the samples for both targets (and the `template/` app when the
+  public API or module glue changed); run them locally before
+  requesting review.
 
 ## Reporting issues
 

@@ -28,6 +28,7 @@ LOG_MODULE_REGISTER(dual_model, LOG_LEVEL_INF);
 
 #include <zephyr/devicetree.h>
 #include "syn_boot_internal.h"
+#include "syn_model_internal.h"
 #include "syn_infer_remote.h"
 
 #define SYN_SHARED_NODE DT_NODELABEL(syn_shared)
@@ -61,6 +62,13 @@ static int register_model(const char *name, uint32_t input_size,
 		return ret;
 	}
 
+	/* Attach the stub blob as registry data so the engine's
+	 * on-demand residency swap covers the local models too: after
+	 * a real SYNN model is prepared on the Neutron NPU, a job on a
+	 * local model swaps the stub blob back in (unpreparing the
+	 * SYNN model) instead of failing its input-size gate (S8).
+	 */
+	syn_model_set_data(handle, dummy_model, sizeof(dummy_model));
 	syn_model_load(handle);
 	LOG_INF("Model '%s' ready (handle %u, in %u out %u)",
 		name, handle, input_size, output_size);
@@ -162,6 +170,18 @@ static int demo_ensure_model(const struct shell *sh)
 
 		if (ret != 0) {
 			shell_error(sh, "register failed: %d", ret);
+			demo_blob_size = 0;
+			return ret;
+		}
+
+		/* Registry data + load: the S8 residency contract
+		 * refuses jobs on models that are not loaded.
+		 */
+		syn_model_set_data(demo_model_handle, demo_blob,
+				   (size_t)demo_blob_size);
+		ret = syn_model_load(demo_model_handle);
+		if (ret != 0) {
+			shell_error(sh, "demo model load failed: %d", ret);
 			demo_blob_size = 0;
 			return ret;
 		}

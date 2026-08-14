@@ -128,6 +128,14 @@ static void *lp_suite_setup(void)
 		zassert_equal(syn_model_register(&info, &lp_model), 0,
 			      "model register failed");
 	}
+
+	/* S8 residency contract: registry load makes the model eligible
+	 * to run (no data attached; lp_before() drives the HAL blob).
+	 */
+	int lret = syn_model_load(lp_model);
+
+	zassert_true(lret == 0 || lret == -EALREADY,
+		     "model load failed: %d", lret);
 	make_inputs();
 	return NULL;
 }
@@ -484,6 +492,11 @@ static void load_dag_model(syn_model_handle_t *handle, uint16_t work)
 		zassert_equal(syn_model_register(&info, handle), 0,
 			      "DAG model register failed");
 	}
+
+	int lret = syn_model_load(*handle);
+
+	zassert_true(lret == 0 || lret == -EALREADY,
+		     "DAG model load failed: %d", lret);
 }
 
 /** DAG execution matches an all-buffers-live reference bit-exactly. */
@@ -729,6 +742,7 @@ ZTEST(syn_layer_preempt_suite, test_unregister_refused_while_suspended)
 	info.output_dtype = SYN_NPU_DTYPE_INT8;
 	zassert_equal(syn_model_register(&info, &lp_model), 0,
 		      "model re-register failed");
+	zassert_ok(syn_model_load(lp_model), "model re-load failed");
 
 	syn_pipeline_destroy(pn);
 	syn_pipeline_destroy(pr);

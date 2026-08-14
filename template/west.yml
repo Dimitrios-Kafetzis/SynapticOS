@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Consumer-workspace manifest for an out-of-tree SynapticOS
+# application. `import: true` chains into synaptic-os's own west.yml,
+# which brings Zephyr v3.7.0 and the NXP HAL (and offers the
+# optional LA_OPT-licensed `neutron` group; see that file).
+#
+# Used via `west init -l <this directory>` from a fresh workspace
+# root -- see README.md for the literal steps.
+
+manifest:
+  remotes:
+    - name: synapticos
+      url-base: https://github.com/Dimitrios-Kafetzis
+
+  projects:
+    - name: SynapticOS
+      remote: synapticos
+      revision: main
+      path: synaptic-os
+      import: true
+
+  self:
+    path: my-app

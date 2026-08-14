@@ -30,6 +30,23 @@ void syn_model_reset_all(void);
  */
 uint32_t syn_model_last_swap_us(void);
 
+/* Make @p handle's data the HAL-resident model before an invoke,
+ * swapping the single-residency NPU on demand (CRC-gated; on Neutron
+ * a real prepare, ~10 ms). Scheduler-thread only, and only while it
+ * owns the running job: mutual exclusion against shell/OTA residency
+ * changers comes from the quiesce protocol, not a lock.
+ * @return 0 when resident (or the model has no attached data),
+ *         -ENOEXEC when the model is not loaded (contract: jobs are
+ *         refused rather than stub-run), other negatives on HAL/CRC
+ *         failure.
+ */
+int syn_model_ensure_resident(syn_model_handle_t handle);
+
+/* On-demand residency swap counters (count and most recent duration,
+ * microseconds). Either pointer may be NULL.
+ */
+void syn_model_residency_stats(uint32_t *swaps, uint32_t *last_us);
+
 #ifdef __cplusplus
 }
 #endif
