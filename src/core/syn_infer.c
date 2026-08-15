@@ -899,7 +899,18 @@ static void scheduler_thread(void *p1, void *p2, void *p3)
 			cb(id, (ret == 0) ? &output : NULL, user_data);
 		}
 
-		k_sem_give(&job->done);
+		/* The drain path (or a poll) may let the submitter consume
+		 * this completion and recycle the slot before this thread
+		 * runs again; an unconditional give would then falsely
+		 * complete the slot's NEXT job. Signal only while this
+		 * completion is still the slot's current occupant.
+		 */
+		k_mutex_lock(&infer_lock, K_FOREVER);
+		if (job->id == id &&
+		    (job->state == JOB_DONE || job->state == JOB_ERROR)) {
+			k_sem_give(&job->done);
+		}
+		k_mutex_unlock(&infer_lock);
 	}
 }
 
