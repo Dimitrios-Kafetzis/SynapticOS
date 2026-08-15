@@ -241,3 +241,22 @@ ZTEST(syn_dma_suite, test_ingest_invalid)
 	cfg.bufs[1] = NULL;
 	zassert_equal(syn_ingest_run(&cfg, 4), -EINVAL, "NULL buffer");
 }
+
+/* Phase 6 S13: a bad DMA channel aborts the pump during priming */
+ZTEST(syn_dma_suite, test_ingest_bad_channel_aborts)
+{
+	static uint8_t src[64];
+	static uint8_t ping[64], pong[64];
+	syn_ingest_config_t cfg = {
+		.src = src,
+		.bufs = { ping, pong },
+		.frame_size = sizeof(src),
+		.dma_channel = 42,
+		.process = ig_process,
+		.user = NULL,
+	};
+
+	int ret = syn_ingest_run(&cfg, 2);
+
+	zassert_equal(ret, -EIO, "bad channel not reported: %d", ret);
+}

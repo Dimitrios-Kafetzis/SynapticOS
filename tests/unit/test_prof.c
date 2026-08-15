@@ -160,3 +160,14 @@ ZTEST(syn_prof_suite, test_prof_layer_trace)
 	zassert_equal(syn_prof_get_layer_time(0, NULL), -EINVAL,
 		      "NULL out must be rejected");
 }
+
+/* Phase 6 S13: enable() clears the last result until a run refills it */
+ZTEST(syn_prof_suite, test_get_last_before_any_run)
+{
+	zassert_ok(syn_prof_enable(), "enable failed");
+
+	syn_prof_result_t r;
+
+	zassert_equal(syn_prof_get_last(&r), -ENOENT,
+		      "stale result served after enable()");
+}

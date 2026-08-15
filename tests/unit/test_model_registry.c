@@ -205,3 +205,168 @@ ZTEST(syn_model_suite, test_get_info)
 
     cleanup_registry();
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: registry negative paths, CRC gate and swap edges      */
+/* ------------------------------------------------------------------ */
+
+#include <zephyr/sys/crc.h>
+#include <synaptic/syn_hal_npu.h>
+#include "syn_model_internal.h"
+
+static uint8_t reg_blob_a[32];
+static uint8_t reg_blob_b[32];
+
+static syn_model_handle_t reg_data_model(const char *name,
+                                         const uint8_t *blob, size_t size,
+                                         uint32_t crc)
+{
+    syn_model_info_t info = {0};
+    syn_model_handle_t h;
+
+    strncpy(info.name, name, sizeof(info.name) - 1);
+    info.input_size = 16;
+    info.output_size = 10;
+    info.crc32 = crc;
+    zassert_equal(syn_model_register(&info, &h), 0,
+                  "register '%s' failed", name);
+    zassert_equal(syn_model_set_data(h, blob, size), 0,
+                  "set_data '%s' failed", name);
+    return h;
+}
+
+ZTEST(syn_model_suite, test_lookup_null_args)
+{
+    syn_model_handle_t h;
+    uint8_t count;
+
+    zassert_equal(syn_model_get_by_name(NULL, &h), -EINVAL,
+                  "NULL name accepted");
+    zassert_equal(syn_model_get_by_name("x", NULL), -EINVAL,
+                  "NULL handle accepted");
+    zassert_equal(syn_model_list(NULL, &count, 4), -EINVAL,
+                  "NULL list accepted");
+}
+
+ZTEST(syn_model_suite, test_invalid_handle_probes)
+{
+    zassert_equal(syn_model_load(SYN_MODEL_INVALID), -EINVAL, "load");
+    zassert_equal(syn_model_unload(SYN_MODEL_INVALID), -EINVAL, "unload");
+    zassert_equal(syn_model_ensure_resident(SYN_MODEL_INVALID), -EINVAL,
+                  "ensure_resident");
+    zassert_false(syn_model_is_loaded(SYN_MODEL_INVALID), "is_loaded");
+    zassert_equal(syn_model_set_data(SYN_MODEL_INVALID, reg_blob_a, 1),
+                  -EINVAL, "set_data");
+}
+
+ZTEST(syn_model_suite, test_set_data_rejects_empty)
+{
+    cleanup_registry();
+
+    syn_model_info_t info = {0};
+    syn_model_handle_t h;
+
+    strncpy(info.name, "sd_probe", sizeof(info.name));
+    zassert_ok(syn_model_register(&info, &h), "register failed");
+    zassert_equal(syn_model_set_data(h, reg_blob_a, 0), -EINVAL,
+                  "data with zero size accepted");
+    zassert_ok(syn_model_set_data(h, NULL, 0), "detach refused");
+
+    cleanup_registry();
+}
+
+ZTEST(syn_model_suite, test_load_crc_gate)
+{
+    cleanup_registry();
+    syn_hal_npu_init();
+
+    for (size_t i = 0; i < sizeof(reg_blob_a); i++) {
+        reg_blob_a[i] = (uint8_t)(i * 7U + 1U);
+    }
+
+    /* registered CRC disagrees with the bytes: load is refused */
+    syn_model_handle_t h = reg_data_model("crc_bad", reg_blob_a,
+                                          sizeof(reg_blob_a), 0x1234U);
+
+    zassert_equal(syn_model_load(h), -EILSEQ,
+                  "corrupt model load accepted");
+    zassert_false(syn_model_is_loaded(h), "loaded despite CRC gate");
+
+    cleanup_registry();
+}
+
+ZTEST(syn_model_suite, test_load_hal_reject_propagates)
+{
+    cleanup_registry();
+    syn_hal_npu_init();
+
+    /* lie about the size: the stub HAL rejects oversized models */
+    syn_model_handle_t h = reg_data_model("too_big", reg_blob_a,
+                                          400U * 1024U, 0U);
+
+    zassert_equal(syn_model_load(h), -ENOMEM,
+                  "oversized model load accepted");
+
+    cleanup_registry();
+}
+
+ZTEST(syn_model_suite, test_residency_stats_snapshot)
+{
+    uint32_t swaps = 0xAAAAAAAA, last = 0xAAAAAAAA;
+
+    syn_model_residency_stats(&swaps, &last);
+    zassert_not_equal(swaps, 0xAAAAAAAA, "swaps not written");
+    zassert_not_equal(last, 0xAAAAAAAA, "last_us not written");
+    syn_model_residency_stats(NULL, NULL); /* NULL-safe */
+}
+
+ZTEST(syn_model_suite, test_swap_and_edges)
+{
+    cleanup_registry();
+    syn_hal_npu_deinit();
+    zassert_ok(syn_hal_npu_init(), "NPU init failed");
+
+    for (size_t i = 0; i < sizeof(reg_blob_a); i++) {
+        reg_blob_a[i] = (uint8_t)(i + 3U);
+        reg_blob_b[i] = (uint8_t)(0x80U - i);
+    }
+
+    syn_model_handle_t ha = reg_data_model(
+        "swap_a", reg_blob_a, sizeof(reg_blob_a),
+        crc32_ieee(reg_blob_a, sizeof(reg_blob_a)));
+    syn_model_handle_t hb = reg_data_model(
+        "swap_b", reg_blob_b, sizeof(reg_blob_b),
+        crc32_ieee(reg_blob_b, sizeof(reg_blob_b)));
+
+    /* argument edges */
+    zassert_equal(syn_model_swap(SYN_MODEL_INVALID, hb), -EINVAL,
+                  "invalid old accepted");
+    zassert_equal(syn_model_swap(ha, ha), -EINVAL, "self-swap accepted");
+
+    /* the real thing: A resident, swap to B */
+    zassert_ok(syn_model_load(ha), "load A failed");
+    zassert_ok(syn_model_swap(ha, hb), "swap failed");
+    zassert_false(syn_model_is_loaded(ha), "old still loaded");
+    zassert_true(syn_model_is_loaded(hb), "new not loaded");
+    zassert_true(syn_model_last_swap_us() < 1000000U,
+                 "swap duration implausible");
+
+    /* swap onto a corrupt model fails and reports it */
+    reg_blob_a[5] ^= 0x20U; /* break A against its registered CRC */
+    zassert_equal(syn_model_swap(hb, ha), -EILSEQ,
+                  "swap onto a corrupt model accepted");
+    reg_blob_a[5] ^= 0x20U;
+
+    /* on-demand residency swap refuses corrupt data the same way:
+     * load both while intact (B loaded but A resident), then corrupt
+     * B behind the registry's back
+     */
+    zassert_ok(syn_model_load(hb), "re-load B failed");
+    zassert_ok(syn_model_load(ha), "re-load A failed");
+    reg_blob_b[9] ^= 0x10U;
+    zassert_equal(syn_model_ensure_resident(hb), -EILSEQ,
+                  "ensure_resident of corrupt data accepted");
+    reg_blob_b[9] ^= 0x10U;
+
+    cleanup_registry();
+}

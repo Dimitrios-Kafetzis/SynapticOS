@@ -58,3 +58,37 @@ ZTEST(syn_init_suite, test_reinit_after_shutdown)
 
     syn_shutdown();
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: version string and HAL-collision propagation          */
+/* ------------------------------------------------------------------ */
+
+#include <string.h>
+#include <synaptic/syn_hal_npu.h>
+
+ZTEST(syn_init_suite, test_version_string)
+{
+    const char *v = syn_version();
+
+    zassert_not_null(v, "version NULL");
+    zassert_true(strlen(v) >= 5, "version implausibly short: '%s'", v);
+}
+
+ZTEST(syn_init_suite, test_init_propagates_npu_collision)
+{
+    syn_shutdown();
+
+    /* someone brought the NPU HAL up outside the runtime */
+    syn_hal_npu_deinit();
+    zassert_equal(syn_hal_npu_init(), 0, "direct NPU init failed");
+
+    int ret = syn_init();
+
+    zassert_equal(ret, -EALREADY,
+                  "init over a live NPU HAL must propagate: %d", ret);
+
+    /* clean retry succeeds */
+    syn_hal_npu_deinit();
+    zassert_equal(syn_init(), 0, "clean re-init failed");
+    syn_shutdown();
+}

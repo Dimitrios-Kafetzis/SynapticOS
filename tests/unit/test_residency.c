@@ -307,3 +307,116 @@ ZTEST(syn_residency_suite, test_on_demand_swap)
 		     "expected at least 2 residency swaps, got %u",
 		     swaps_after - swaps_before);
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: dispatch-time failure edges (controlled registry)     */
+/* ------------------------------------------------------------------ */
+
+/** An input bigger than the NPU staging buffer fails at dispatch. */
+ZTEST(syn_residency_suite, test_input_exceeds_npu_buffer)
+{
+	static uint8_t big_buf[1200];
+	uint32_t shape[1] = { sizeof(big_buf) };
+	syn_tensor_t big;
+
+	memset(big_buf, 0x22, sizeof(big_buf));
+	syn_mem_tensor_init(&big, shape, 1, SYN_NPU_DTYPE_INT8);
+	big.data = big_buf;
+	big.lifetime = SYN_MEM_SHARED;
+
+	syn_pipeline_t *pipe = syn_pipeline_create("res_big_in");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_model(pipe, plain_model), 0,
+		      "add_model failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &big, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_equal(syn_infer_wait(job, 2000), -ENOMEM,
+		      "oversized input must fail at set_input");
+
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(job, &r), -ENOMEM, "result");
+	syn_pipeline_destroy(pipe);
+}
+
+/** A declared model output larger than the arena fails the stage
+ *  buffer allocation.
+ */
+ZTEST(syn_residency_suite, test_output_exceeds_arena)
+{
+	/* own plain blob so the job deterministically runs the
+	 * monolithic stub path, not whatever blob was resident
+	 */
+	static const uint8_t big_out_blob[16] = {0};
+	syn_model_info_t info = {0};
+	syn_model_handle_t h;
+
+	strncpy(info.name, "res_big_out", sizeof(info.name) - 1);
+	info.input_size = RES_PLAIN_INPUT;
+	info.output_size = 32768; /* 4x the whole test arena */
+	info.input_dtype = SYN_NPU_DTYPE_INT8;
+	info.output_dtype = SYN_NPU_DTYPE_INT8;
+	zassert_ok(syn_model_register(&info, &h), "register failed");
+	zassert_ok(syn_model_set_data(h, big_out_blob,
+				      sizeof(big_out_blob)), "set_data");
+	zassert_ok(syn_model_load(h), "load failed");
+
+	syn_pipeline_t *pipe = syn_pipeline_create("res_big_out");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_model(pipe, h), 0, "add_model failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &plain_tensor, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_equal(syn_infer_wait(job, 2000), -ENOMEM,
+		      "oversized output must fail the arena alloc");
+
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(job, &r), -ENOMEM, "result");
+	syn_pipeline_destroy(pipe);
+	zassert_ok(syn_model_unregister(h), "cleanup failed");
+}
+
+/** A model unregistered while its job is queued fails at dispatch
+ *  when the pipeline can no longer resolve it.
+ */
+ZTEST(syn_residency_suite, test_unregister_before_dispatch)
+{
+	syn_model_info_t info = {0};
+	syn_model_handle_t h;
+
+	strncpy(info.name, "res_gone", sizeof(info.name) - 1);
+	info.input_size = RES_PLAIN_INPUT;
+	info.output_size = 10;
+	info.input_dtype = SYN_NPU_DTYPE_INT8;
+	info.output_dtype = SYN_NPU_DTYPE_INT8;
+	zassert_ok(syn_model_register(&info, &h), "register failed");
+	zassert_ok(syn_model_load(h), "load failed");
+
+	syn_pipeline_t *pipe = syn_pipeline_create("res_gone");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_model(pipe, h), 0, "add_model failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &plain_tensor, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+
+	/* still queued (cooperative thread): pull the model out */
+	zassert_ok(syn_model_unregister(h), "unregister failed");
+	zassert_equal(syn_infer_wait(job, 2000), -EINVAL,
+		      "job on a vanished model must fail");
+
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(job, &r), -EINVAL, "result");
+	syn_pipeline_destroy(pipe);
+}

@@ -458,3 +458,351 @@ ZTEST(syn_store_suite, test_synn_payload_round_trip)
     zassert_equal(desc.scratch_size, 2048U, "scratch size");
     zassert_equal(desc.weights[0], (uint8_t)(80U * 13U), "weights bytes");
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: negative-path and structural-edge coverage            */
+/* ------------------------------------------------------------------ */
+
+#include <zephyr/sys/crc.h>
+
+/** Argument and readiness guards of every introspection entry. */
+ZTEST(syn_store_suite, test_accessor_and_guard_probes)
+{
+    store_fresh();
+    payload_fill(40);
+
+    syn_model_info_t info = make_info("probe_a", "1.0");
+    syn_model_info_t out;
+
+    zassert_ok(syn_store_install(&info, payload, sizeof(payload), NULL),
+               "install failed");
+
+    /* slot_info: bad slot, NULL out, empty slot, then success */
+    zassert_equal(syn_store_slot_info(9, &out), -EINVAL, "bad slot");
+    zassert_equal(syn_store_slot_info(0, NULL), -EINVAL, "NULL info");
+    zassert_equal(syn_store_slot_info(1, &out), -ENOENT, "empty slot");
+    zassert_ok(syn_store_slot_info(0, &out), "slot_info failed");
+    zassert_equal(strncmp(out.name, "probe_a", sizeof(out.name)), 0,
+                  "wrong record");
+
+    /* layout access while ready */
+    const syn_store_layout_t *l = syn_store_layout_get();
+
+    zassert_not_null(l, "layout NULL while ready");
+    zassert_equal(l->slot_count, 2, "layout slot_count");
+
+    /* slot-guard probes on the mutating entries */
+    zassert_equal(syn_store_slot_bounds(9, NULL, NULL), -EINVAL,
+                  "bad slot_bounds accepted");
+    zassert_equal(syn_store_begin_staging(9), -EINVAL,
+                  "bad begin_staging accepted");
+    zassert_equal(syn_store_begin_staging(0), -EBUSY,
+                  "begin_staging over the active slot accepted");
+    zassert_equal(syn_store_mark_staged(9, &info), -EINVAL,
+                  "bad mark_staged accepted");
+    zassert_equal(syn_store_mark_staged(0, &info), -EBUSY,
+                  "mark_staged over the active slot accepted");
+    zassert_equal(syn_store_activate(9), -EINVAL, "bad activate accepted");
+    zassert_equal(syn_store_activate(1), -ENOENT,
+                  "activate of an empty slot accepted");
+    zassert_equal(syn_store_install(NULL, payload, 1, NULL), -EINVAL,
+                  "NULL install accepted");
+    zassert_equal(syn_store_clear_staged(), 0,
+                  "clear with nothing staged must be a no-op");
+
+    /* install with a wrong self-declared CRC is refused up front */
+    info.crc32 = 0xDEADBEEFU;
+    zassert_equal(syn_store_install(&info, payload, sizeof(payload), NULL),
+                  -EILSEQ, "bad-CRC install accepted");
+
+    /* not-ready guards */
+    syn_store_deinit();
+    zassert_equal(syn_store_rollback(), -EINVAL, "rollback while down");
+    zassert_equal(syn_store_clear_staged(), -EINVAL, "clear while down");
+
+    uint8_t slot;
+
+    zassert_equal(syn_store_staging_slot(&slot), -EINVAL,
+                  "staging_slot while down");
+    zassert_is_null(syn_store_layout_get(), "layout while down");
+}
+
+/** Every structural reject of layout validation. */
+ZTEST(syn_store_suite, test_layout_validation_rejects)
+{
+    store_fresh();
+    syn_store_deinit();
+
+    syn_store_layout_t bad;
+
+    /* NULL arguments and slot_count out of range */
+    zassert_equal(syn_store_init(NULL, &lay), -EINVAL, "NULL port");
+    zassert_equal(syn_store_init(&port, NULL), -EINVAL, "NULL layout");
+    bad = lay;
+    bad.slot_count = 1;
+    zassert_equal(syn_store_init(&port, &bad), -EINVAL, "slot_count 1");
+
+    /* zero region sizes */
+    bad = lay;
+    bad.registry_size = 0;
+    zassert_equal(syn_store_init(&port, &bad), -EINVAL, "registry 0");
+
+    /* registry too small for one image */
+    bad = lay;
+    bad.registry_size = 128;
+    zassert_equal(syn_store_init(&port, &bad), -EINVAL, "registry tiny");
+
+    /* slot smaller than the .synm header */
+    bad = lay;
+    bad.slot_size = 64;
+    zassert_equal(syn_store_init(&port, &bad), -EINVAL, "slot tiny");
+
+    /* offsets off the sector grid */
+    bad = lay;
+    bad.slot_off[1] = lay.slot_off[1] + 1U;
+    zassert_equal(syn_store_init(&port, &bad), -EINVAL, "unaligned slot");
+
+    /* overlapping regions */
+    bad = lay;
+    bad.slot_off[1] = bad.slot_off[0];
+    zassert_equal(syn_store_init(&port, &bad), -EINVAL, "overlap");
+
+    /* page geometry the chunked writer cannot stream */
+    syn_flash_port_t wide = port;
+
+    wide.page_size = 512; /* > sizeof(io_buf) is impossible to buffer */
+    zassert_equal(syn_store_init(&wide, &lay), -EINVAL, "page too wide");
+
+    /* recover, then double-init guard */
+    zassert_ok(syn_store_init(&port, &lay), "re-init failed");
+    zassert_equal(syn_store_init(&port, &lay), -EALREADY, "double init");
+}
+
+/** With every slot occupied and the only non-active slot being the
+ *  rollback pivot, staging falls through to the last-resort scan.
+ */
+ZTEST(syn_store_suite, test_staging_slot_last_resort)
+{
+    store_fresh();
+    payload_fill(41);
+
+    syn_model_info_t a = make_info("lr_a", "1.0");
+    syn_model_info_t b = make_info("lr_b", "1.0");
+
+    zassert_ok(syn_store_install(&a, payload, sizeof(payload), NULL),
+               "install A failed");
+    payload_fill(42);
+    zassert_ok(syn_store_install(&b, payload, sizeof(payload), NULL),
+               "install B failed");
+
+    /* active 1, pivot 0, both occupied: only slot 0 can stage */
+    zassert_equal(syn_store_active_slot(), 1, "active slot");
+    zassert_equal(syn_store_prev_active_slot(), 0, "pivot slot");
+
+    uint8_t slot = 0xAA;
+
+    zassert_ok(syn_store_staging_slot(&slot), "staging_slot failed");
+    zassert_equal(slot, 0, "last-resort scan must pick the pivot");
+}
+
+/** A full RAM registry blocks the resident-registration tail of
+ *  install; the store still persists the record.
+ */
+ZTEST(syn_store_suite, test_registry_full_blocks_residency)
+{
+    store_fresh();
+    payload_fill(43);
+
+    /* fill the RAM registry to CONFIG_SYNAPTIC_MAX_MODELS */
+    syn_model_handle_t hs[CONFIG_SYNAPTIC_MAX_MODELS];
+    char name[16];
+
+    for (int i = 0; i < CONFIG_SYNAPTIC_MAX_MODELS; i++) {
+        syn_model_info_t info = {0};
+
+        snprintf(name, sizeof(name), "fill_%d", i);
+        strncpy(info.name, name, sizeof(info.name) - 1);
+        zassert_ok(syn_model_register(&info, &hs[i]),
+                   "filler register %d failed", i);
+    }
+
+    syn_model_info_t info = make_info("no_room", "1.0");
+    int ret = syn_store_install(&info, payload, sizeof(payload), NULL);
+
+    zassert_equal(ret, -ENOMEM, "full registry not reported: %d", ret);
+
+    /* flash state is authoritative: the record itself landed */
+    zassert_equal(syn_store_active_slot(), 0, "record not persisted");
+
+    for (int i = 0; i < CONFIG_SYNAPTIC_MAX_MODELS; i++) {
+        zassert_ok(syn_model_unregister(hs[i]), "filler cleanup %d", i);
+    }
+}
+
+/* Registry image header offsets (struct store_hdr in the store) */
+#define REG_HDR_PREV_OFF 7U
+#define REG_HDR_GEN_OFF  8U
+#define REG_HDR_CRC_OFF  20U
+#define REG_HDR_SIZE     24U
+
+/* Patch one byte of the newest registry copy and re-seal its CRC32
+ * (test-only surgery on the RAM fixture; real flash cannot do this).
+ */
+static void registry_patch_newest(uint32_t byte_off, uint8_t value)
+{
+    uint32_t img = REG_HDR_SIZE + 2U * sizeof(syn_model_info_t);
+    uint32_t gen0, gen1;
+
+    memcpy(&gen0, &flash_mem[lay.registry_off[0] + REG_HDR_GEN_OFF], 4);
+    memcpy(&gen1, &flash_mem[lay.registry_off[1] + REG_HDR_GEN_OFF], 4);
+
+    uint8_t *copy = &flash_mem[(gen1 > gen0) ? lay.registry_off[1]
+                                             : lay.registry_off[0]];
+
+    copy[byte_off] = value;
+    memset(&copy[REG_HDR_CRC_OFF], 0, 4);
+
+    uint32_t crc = crc32_ieee(copy, img);
+
+    memcpy(&copy[REG_HDR_CRC_OFF], &crc, 4);
+}
+
+/** Without a recorded pivot (pre-v2 image), rollback falls back to
+ *  scanning for an occupied, non-active, non-staged slot.
+ */
+ZTEST(syn_store_suite, test_rollback_fallback_scan)
+{
+    store_fresh();
+    payload_fill(44);
+
+    syn_model_info_t a = make_info("fb_a", "1.0");
+    syn_model_info_t b = make_info("fb_b", "1.0");
+
+    zassert_ok(syn_store_install(&a, payload, sizeof(payload), NULL),
+               "install A failed");
+    payload_fill(45);
+    zassert_ok(syn_store_install(&b, payload, sizeof(payload), NULL),
+               "install B failed");
+
+    /* erase the pivot from the newest image, like a v1 registry */
+    registry_patch_newest(REG_HDR_PREV_OFF, SYN_STORE_SLOT_NONE);
+    store_reboot();
+    zassert_equal(syn_store_prev_active_slot(), SYN_STORE_SLOT_NONE,
+                  "pivot patch did not take");
+
+    zassert_ok(syn_store_rollback(), "fallback rollback failed");
+    zassert_equal(syn_store_active_slot(), 0,
+                  "fallback scan must find slot 0");
+    zassert_equal(syn_store_prev_active_slot(), 1,
+                  "demoted slot must become the pivot");
+}
+
+/** Structurally invalid registry headers are rejected before the CRC:
+ *  impossible record counts and out-of-range slot references.
+ */
+ZTEST(syn_store_suite, test_registry_structural_rejects)
+{
+    static const struct {
+        uint32_t off;   /* header byte to poison */
+        uint8_t  val;
+    } cases[] = {
+        { 6U, 9U },              /* slot_count > layout capacity  */
+        { 16U, 5U },             /* active_slot out of range      */
+        { REG_HDR_PREV_OFF, 5U }, /* prev_active out of range     */
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        store_fresh();
+
+        /* forge a header in copy 0: valid magic/version, poisoned
+         * field. Every structural check fires before the CRC, so the
+         * image needs no sealing.
+         */
+        uint8_t hdr[REG_HDR_SIZE] = {
+            0x53, 0x59, 0x4E, 0x52,  /* "SYNR" LE magic */
+            0x02, 0x00,              /* version 2       */
+            0x02,                    /* slot_count      */
+            0xFF,                    /* prev_active     */
+            0x01, 0x00, 0x00, 0x00,  /* generation 1    */
+            0x00, 0x00, 0x00, 0x00,  /* wear            */
+            0xFF, 0xFF,              /* active, staged  */
+            0x03, 0x00,              /* occupied, rsvd  */
+            0x00, 0x00, 0x00, 0x00,  /* crc32 (sealed below) */
+        };
+
+        hdr[cases[i].off] = cases[i].val;
+        syn_store_deinit();
+        memcpy(&flash_mem[lay.registry_off[0]], hdr, sizeof(hdr));
+
+        zassert_ok(syn_store_init(&port, &lay), "init failed");
+        zassert_equal(syn_store_generation(), 0,
+                      "poisoned image %u adopted", (unsigned)i);
+    }
+}
+
+/** Corrupted payload of the incoming slot: activation itself sticks
+ *  (flash registry is authoritative) but the hot NPU reload of the
+ *  new model is refused by the CRC gate.
+ */
+ZTEST(syn_store_suite, test_activate_hot_reload_refused)
+{
+    store_fresh();
+    payload_fill(46);
+
+    syn_model_handle_t ha = SYN_MODEL_INVALID;
+    syn_model_info_t a = make_info("hr_a", "1.0");
+    syn_model_info_t b = make_info("hr_b", "1.0");
+
+    zassert_ok(syn_store_install(&a, payload, sizeof(payload), &ha),
+               "install A failed");
+    payload_fill(47);
+    zassert_ok(syn_store_install(&b, payload, sizeof(payload), NULL),
+               "install B failed");
+
+    /* cosmic ray on slot 0's payload, then hand it the NPU */
+    flash_mem[lay.slot_off[0] + SYN_SYNM_HDR_SIZE + 17] ^= 0x40U;
+
+    zassert_ok(syn_model_get_by_name("hr_a", &ha), "A not resident");
+    zassert_ok(syn_model_get_by_name("hr_b", &ha), "B not resident");
+    zassert_ok(syn_model_load(ha), "load B failed");
+
+    zassert_ok(syn_store_activate(0), "activate must stick");
+    zassert_equal(syn_store_active_slot(), 0, "flash state moved back");
+
+    syn_model_handle_t hnew;
+
+    zassert_ok(syn_model_get_by_name("hr_a", &hnew), "A lost");
+    zassert_false(syn_model_is_loaded(hnew),
+                  "corrupt model must not be NPU-loaded");
+}
+
+/** Same cosmic ray during rollback: the pivot becomes active but the
+ *  hot reload of its corrupt payload is refused.
+ */
+ZTEST(syn_store_suite, test_rollback_hot_reload_refused)
+{
+    store_fresh();
+    payload_fill(48);
+
+    syn_model_info_t a = make_info("rr_a", "1.0");
+    syn_model_info_t b = make_info("rr_b", "1.0");
+    syn_model_handle_t hb = SYN_MODEL_INVALID;
+
+    zassert_ok(syn_store_install(&a, payload, sizeof(payload), NULL),
+               "install A failed");
+    payload_fill(49);
+    zassert_ok(syn_store_install(&b, payload, sizeof(payload), &hb),
+               "install B failed");
+    zassert_ok(syn_model_load(hb), "load B failed");
+
+    flash_mem[lay.slot_off[0] + SYN_SYNM_HDR_SIZE + 5] ^= 0x08U;
+
+    zassert_ok(syn_store_rollback(), "rollback must stick");
+    zassert_equal(syn_store_active_slot(), 0, "not rolled back");
+
+    syn_model_handle_t hp;
+
+    zassert_ok(syn_model_get_by_name("rr_a", &hp), "pivot model lost");
+    zassert_false(syn_model_is_loaded(hp),
+                  "corrupt pivot must not be NPU-loaded");
+}

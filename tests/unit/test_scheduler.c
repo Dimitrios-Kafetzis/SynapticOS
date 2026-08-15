@@ -340,3 +340,332 @@ ZTEST(syn_sched_suite, test_max_concurrent)
 
 	syn_pipeline_destroy(pipe);
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: scheduler negative paths and quiesce-window edges     */
+/* ------------------------------------------------------------------ */
+
+#include "syn_infer_internal.h"
+
+/* Slow passthrough stage: pins the scheduler thread mid-job long
+ * enough for the cooperative test thread to observe RUNNING state
+ * (volatile loop: k_busy_wait needs timer hardware QEMU lacks).
+ */
+static int slow_stage(const syn_tensor_t *in, syn_tensor_t *out,
+                      const void *config)
+{
+    ARG_UNUSED(config);
+
+    for (volatile int i = 0; i < 300000; i++) {
+    }
+    if (out->size < in->size) {
+        return -ENOMEM;
+    }
+    memcpy(out->data, in->data, in->size);
+    out->size = in->size;
+    out->dtype = in->dtype;
+    out->ndim = in->ndim;
+    memcpy(out->shape, in->shape, sizeof(out->shape));
+    return 0;
+}
+
+static syn_pipeline_t *sched_pipe(const char *name)
+{
+    syn_pipeline_t *pipe = syn_pipeline_create(name);
+
+    zassert_not_null(pipe, "pipeline create failed");
+    zassert_equal(syn_pipeline_add_model(pipe, sched_model), 0,
+                  "add_model failed");
+    zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+    return pipe;
+}
+
+ZTEST(syn_sched_suite, test_stats_reset)
+{
+    syn_infer_get_stats(NULL); /* NULL-safe */
+
+    make_input(0, 0x21);
+
+    int8_t out_buf[16];
+    syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+
+    zassert_ok(syn_infer_run_sync(sched_model, &input_tensors[0], &out,
+                                  SYN_PRIORITY_NORMAL), "run failed");
+
+    syn_infer_stats_t st;
+
+    syn_infer_get_stats(&st);
+    zassert_true(st.completed > 0, "no completion recorded");
+
+    syn_infer_reset_stats();
+    syn_infer_get_stats(&st);
+    zassert_equal(st.completed, 0, "completed not reset");
+    zassert_equal(st.errors, 0, "errors not reset");
+}
+
+ZTEST(syn_sched_suite, test_quiesce_defers_then_replays)
+{
+    syn_pipeline_t *pipe = sched_pipe("defer");
+
+    make_input(0, 0x31);
+    make_input(1, 0x32);
+
+    /* nothing running: quiesce returns immediately but parks dispatch */
+    syn_infer_quiesce();
+
+    syn_job_id_t id1 = syn_infer_submit(pipe, &input_tensors[0], NULL);
+    syn_job_id_t id2 = syn_infer_submit(pipe, &input_tensors[1], NULL);
+
+    zassert_not_equal(id1, SYN_JOB_INVALID, "submit 1 failed");
+    zassert_not_equal(id2, SYN_JOB_INVALID, "submit 2 failed");
+
+    /* the scheduler wakes, sees the pause, and defers both wakeups.
+     * Equal priority, no deadlines: dispatch falls to the seq tie.
+     */
+    k_msleep(2);
+    zassert_equal(syn_infer_wait(id1, 0), -EAGAIN,
+                  "job dispatched through a paused gate");
+
+    syn_infer_release();
+
+    zassert_ok(syn_infer_wait(id1, 2000), "wait 1 failed");
+    zassert_ok(syn_infer_wait(id2, 2000), "wait 2 failed");
+
+    syn_tensor_t r;
+
+    zassert_ok(syn_infer_get_result(id1, &r), "result 1 failed");
+    zassert_ok(syn_infer_get_result(id2, &r), "result 2 failed");
+    syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_sched_suite, test_release_replay_finds_nothing)
+{
+    syn_pipeline_t *pipe = sched_pipe("replay");
+
+    make_input(0, 0x33);
+    syn_infer_quiesce();
+
+    syn_job_id_t id = syn_infer_submit(pipe, &input_tensors[0], NULL);
+
+    zassert_not_equal(id, SYN_JOB_INVALID, "submit failed");
+    k_msleep(2); /* the wake is deferred */
+
+    zassert_ok(syn_infer_cancel(id), "cancel failed");
+    syn_infer_release();
+    k_msleep(2); /* replayed wake dispatches into an empty queue */
+
+    zassert_equal(syn_infer_wait(id, 100), -ECANCELED, "not cancelled");
+
+    syn_tensor_t r;
+
+    zassert_equal(syn_infer_get_result(id, &r), -ECANCELED,
+                  "cancelled result");
+    syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_sched_suite, test_destroy_cancels_queued_job)
+{
+    syn_pipeline_t *pipe = sched_pipe("dcq");
+
+    make_input(0, 0x34);
+    syn_infer_quiesce();
+
+    syn_job_id_t id = syn_infer_submit(pipe, &input_tensors[0], NULL);
+
+    zassert_not_equal(id, SYN_JOB_INVALID, "submit failed");
+
+    syn_pipeline_destroy(pipe);
+    syn_infer_release();
+
+    zassert_equal(syn_infer_wait(id, 100), -ECANCELED,
+                  "destroy must cancel the queued job");
+
+    syn_tensor_t r;
+
+    zassert_equal(syn_infer_get_result(id, &r), -ECANCELED,
+                  "cancelled result");
+}
+
+ZTEST(syn_sched_suite, test_cancel_running_and_quiesce_drain)
+{
+    syn_pipeline_t *pipe = syn_pipeline_create("slowrun");
+
+    zassert_not_null(pipe, "create failed");
+    zassert_equal(syn_pipeline_add_preprocess(pipe, slow_stage, NULL), 0,
+                  "add slow stage failed");
+    zassert_equal(syn_pipeline_add_model(pipe, sched_model), 0,
+                  "add_model failed");
+    zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+    make_input(0, 0x35);
+
+    syn_job_id_t id = syn_infer_submit(pipe, &input_tensors[0], NULL);
+
+    zassert_not_equal(id, SYN_JOB_INVALID, "submit failed");
+
+    /* land inside the slow stage */
+    k_msleep(5);
+    zassert_equal(syn_infer_cancel(id), -EBUSY,
+                  "cancel of a RUNNING job must be refused");
+
+    /* quiesce now has a live job to drain */
+    syn_infer_quiesce();
+    syn_infer_release();
+
+    zassert_ok(syn_infer_wait(id, 5000), "wait failed");
+
+    syn_tensor_t r;
+
+    zassert_ok(syn_infer_get_result(id, &r), "result failed");
+    syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_sched_suite, test_wait_twice_on_error_job)
+{
+    syn_pipeline_t *pipe = sched_pipe("errwait");
+
+    make_input(0, 0x36);
+    zassert_ok(syn_model_unload(sched_model), "unload failed");
+
+    syn_job_id_t id = syn_infer_submit(pipe, &input_tensors[0], NULL);
+
+    zassert_not_equal(id, SYN_JOB_INVALID, "submit failed");
+    zassert_equal(syn_infer_wait(id, 2000), -ENOEXEC, "first wait");
+    zassert_equal(syn_infer_wait(id, 2000), -ENOEXEC,
+                  "second wait must read the stored result");
+
+    zassert_equal(syn_infer_get_result(id, NULL), -EINVAL,
+                  "NULL output accepted");
+
+    syn_tensor_t r;
+
+    zassert_equal(syn_infer_get_result(id, &r), -ENOEXEC,
+                  "error result");
+
+    int lret = syn_model_load(sched_model);
+
+    zassert_true(lret == 0 || lret == -EALREADY, "re-load failed");
+    syn_pipeline_destroy(pipe);
+}
+
+/* Cancel fired from the system workqueue while the submitter blocks
+ * in wait: the waiter must see -ECANCELED, not a result.
+ */
+static syn_job_id_t cancel_target;
+
+static void cancel_work_fn(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    (void)syn_infer_cancel(cancel_target);
+}
+
+static K_WORK_DELAYABLE_DEFINE(cancel_work, cancel_work_fn);
+
+ZTEST(syn_sched_suite, test_cancel_lands_during_wait)
+{
+    syn_pipeline_t *pipe = sched_pipe("cxwait");
+
+    make_input(0, 0x37);
+    syn_infer_quiesce(); /* keep the job queued while we wait on it */
+
+    syn_job_id_t id = syn_infer_submit(pipe, &input_tensors[0], NULL);
+
+    zassert_not_equal(id, SYN_JOB_INVALID, "submit failed");
+    cancel_target = id;
+    k_work_schedule(&cancel_work, K_MSEC(20));
+
+    zassert_equal(syn_infer_wait(id, 2000), -ECANCELED,
+                  "waiter must observe the cancel");
+
+    syn_infer_release();
+
+    syn_tensor_t r;
+
+    zassert_equal(syn_infer_get_result(id, &r), -ECANCELED,
+                  "cancelled result");
+    syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_sched_suite, test_done_slots_block_submission)
+{
+    syn_pipeline_t *pipe = sched_pipe("slots");
+
+    make_input(0, 0x38);
+
+    /* run the table full of DONE-but-unconsumed jobs */
+    syn_job_id_t ids[CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS];
+
+    for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
+        ids[i] = syn_infer_submit(pipe, &input_tensors[0], NULL);
+        zassert_not_equal(ids[i], SYN_JOB_INVALID, "submit %d failed", i);
+
+        int wret = syn_infer_wait(ids[i], 2000);
+
+        zassert_equal(wret, 0, "wait %d failed: %d", i, wret);
+    }
+
+    /* no active jobs, but every slot still holds a result */
+    zassert_equal(syn_infer_submit(pipe, &input_tensors[0], NULL),
+                  SYN_JOB_INVALID, "submit into a full table accepted");
+
+    /* run_sync trips over the same wall and cleans up after itself */
+    int8_t out_buf[16];
+    syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+
+    zassert_equal(syn_infer_run_sync(sched_model, &input_tensors[0],
+                                     &out, SYN_PRIORITY_NORMAL), -EBUSY,
+                  "run_sync into a full table accepted");
+
+    syn_tensor_t r;
+
+    for (int i = 0; i < CONFIG_SYNAPTIC_MAX_CONCURRENT_JOBS; i++) {
+        zassert_ok(syn_infer_get_result(ids[i], &r),
+                   "consume %d failed", i);
+    }
+    syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_sched_suite, test_run_sync_argument_edges)
+{
+    make_input(0, 0x39);
+
+    int8_t out_buf[16];
+    syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+
+    zassert_equal(syn_infer_run_sync(sched_model, NULL, &out,
+                                     SYN_PRIORITY_NORMAL), -EINVAL,
+                  "NULL input accepted");
+    zassert_equal(syn_infer_run_sync(sched_model, &input_tensors[0],
+                                     NULL, SYN_PRIORITY_NORMAL), -EINVAL,
+                  "NULL output accepted");
+    zassert_equal(syn_infer_run_sync(SYN_MODEL_INVALID,
+                                     &input_tensors[0], &out,
+                                     SYN_PRIORITY_NORMAL), -EINVAL,
+                  "invalid model accepted");
+
+    /* pipeline pool exhausted: run_sync cannot build its pipeline */
+    syn_pipeline_t *pipes[4];
+
+    for (int i = 0; i < 4; i++) {
+        pipes[i] = syn_pipeline_create("hog");
+        zassert_not_null(pipes[i], "hog create %d failed", i);
+    }
+    zassert_equal(syn_infer_run_sync(sched_model, &input_tensors[0],
+                                     &out, SYN_PRIORITY_NORMAL), -ENOMEM,
+                  "run_sync without a free pipeline accepted");
+    for (int i = 0; i < 4; i++) {
+        syn_pipeline_destroy(pipes[i]);
+    }
+
+    /* NULL data hands back the arena-backed descriptor */
+    syn_tensor_t arena_out = { .data = NULL, .size = 0 };
+
+    zassert_ok(syn_infer_run_sync(sched_model, &input_tensors[0],
+                                  &arena_out, SYN_PRIORITY_NORMAL),
+               "arena-descriptor run failed");
+    zassert_not_null(arena_out.data, "no arena descriptor returned");
+    zassert_equal(arena_out.size, 10, "wrong arena output size");
+
+    zassert_false(syn_infer_model_suspended(SYN_MODEL_INVALID),
+                  "invalid model reported as suspended");
+}

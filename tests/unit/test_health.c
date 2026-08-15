@@ -119,3 +119,19 @@ ZTEST(syn_health_suite, test_introspection)
 	zassert_true(syn_health_fault_count() >= (uint32_t)faults_seen,
 		     "global counter must cover this suite's episodes");
 }
+
+/* Phase 6 S13: id-range guards are silent no-ops / clean errors */
+ZTEST(syn_health_suite, test_id_guards)
+{
+	syn_health_kick(-1);
+	syn_health_kick(SYN_HEALTH_MAX_SOURCES);
+	syn_health_set_busy(-1, true);
+	syn_health_set_busy(SYN_HEALTH_MAX_SOURCES, false);
+
+	syn_health_info_t info;
+
+	zassert_equal(syn_health_get(-1, &info), -ENOENT, "negative idx");
+	zassert_equal(syn_health_get(SYN_HEALTH_MAX_SOURCES, &info),
+		      -ENOENT, "idx past the table");
+	zassert_equal(syn_health_get(0, NULL), -ENOENT, "NULL info");
+}

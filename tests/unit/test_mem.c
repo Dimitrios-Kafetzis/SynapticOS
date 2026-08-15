@@ -350,3 +350,104 @@ ZTEST(syn_mem_suite, test_zero_size_shape)
     }
     /* Either behavior (NULL or 0-size) is acceptable */
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: allocator edge coverage                               */
+/* ------------------------------------------------------------------ */
+
+#include "syn_mem_internal.h"
+
+ZTEST(syn_mem_suite, test_init_smaller_than_scratch)
+{
+    /* an arena that cannot even hold the scratch pool is refused */
+    int ret = syn_mem_init(test_arena, CONFIG_SYNAPTIC_SCRATCH_POOL_SIZE);
+
+    zassert_equal(ret, -EINVAL, "scratch-only arena accepted: %d", ret);
+    zassert_ok(syn_mem_init(test_arena, TEST_ARENA_SIZE), "re-init failed");
+}
+
+ZTEST(syn_mem_suite, test_unknown_dtype_defaults_to_bytes)
+{
+    syn_mem_init(test_arena, TEST_ARENA_SIZE);
+
+    uint32_t shape[1] = { 8 };
+    syn_tensor_t *t = syn_mem_tensor_alloc(shape, 1,
+                                           (syn_npu_dtype_t)0x7F,
+                                           SYN_MEM_EPHEMERAL);
+
+    zassert_not_null(t, "alloc with unknown dtype failed");
+    zassert_equal(t->size, 8, "unknown dtype must size as bytes");
+}
+
+ZTEST(syn_mem_suite, test_free_is_noop)
+{
+    syn_mem_init(test_arena, TEST_ARENA_SIZE);
+
+    uint32_t shape[1] = { 16 };
+    syn_tensor_t *t = syn_mem_tensor_alloc(shape, 1, SYN_NPU_DTYPE_INT8,
+                                           SYN_MEM_EPHEMERAL);
+
+    zassert_not_null(t, "alloc failed");
+
+    syn_mem_stats_t before, after;
+
+    syn_mem_get_stats(&before);
+    syn_mem_tensor_free(t);
+    syn_mem_get_stats(&after);
+    zassert_equal(before.arena_used, after.arena_used,
+                  "free must not move the bump pointer");
+}
+
+ZTEST(syn_mem_suite, test_tensor_init_invalid_args)
+{
+    uint32_t shape[1] = { 4 };
+    syn_tensor_t t;
+
+    zassert_equal(syn_mem_tensor_init(NULL, shape, 1,
+                                      SYN_NPU_DTYPE_INT8), -EINVAL,
+                  "NULL tensor accepted");
+    zassert_equal(syn_mem_tensor_init(&t, NULL, 1,
+                                      SYN_NPU_DTYPE_INT8), -EINVAL,
+                  "NULL shape accepted");
+    zassert_equal(syn_mem_tensor_init(&t, shape, 5,
+                                      SYN_NPU_DTYPE_INT8), -EINVAL,
+                  "ndim 5 accepted");
+}
+
+ZTEST(syn_mem_suite, test_scratch_zero_and_stats_null)
+{
+    syn_mem_init(test_arena, TEST_ARENA_SIZE);
+
+    zassert_is_null(syn_mem_scratch_acquire(0),
+                    "zero-byte scratch accepted");
+    zassert_equal(syn_mem_get_stats(NULL), -EINVAL,
+                  "NULL stats accepted");
+}
+
+ZTEST(syn_mem_suite, test_layout_snapshot)
+{
+    syn_mem_init(test_arena, TEST_ARENA_SIZE);
+
+    zassert_equal(syn_mem_get_layout(NULL), -EINVAL,
+                  "NULL layout accepted");
+
+    uint32_t shape[1] = { 32 };
+
+    zassert_not_null(syn_mem_tensor_alloc(shape, 1, SYN_NPU_DTYPE_INT8,
+                                          SYN_MEM_PERSISTENT),
+                     "persistent alloc failed");
+    zassert_not_null(syn_mem_scratch_acquire(64), "scratch failed");
+
+    syn_mem_layout_t l;
+
+    zassert_ok(syn_mem_get_layout(&l), "layout failed");
+    zassert_equal(l.base, test_arena, "layout base");
+    zassert_equal(l.total, TEST_ARENA_SIZE, "layout total");
+    zassert_equal(l.usable,
+                  TEST_ARENA_SIZE - CONFIG_SYNAPTIC_SCRATCH_POOL_SIZE,
+                  "layout usable");
+    zassert_true(l.persistent_used >= 32, "layout persistent");
+    zassert_equal(l.scratch_used, 64, "layout scratch");
+
+    syn_mem_print_stats(); /* smoke: formats the same snapshot */
+}

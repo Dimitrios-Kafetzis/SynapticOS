@@ -11,6 +11,7 @@ target_sources(app PRIVATE
     test_model_store_multi.c
     test_model_ota.c
     test_model_swap.c
+    test_store_faults.c
 )
 
 target_link_libraries(app PRIVATE synaptic_os)

@@ -513,3 +513,244 @@ ZTEST(syn_process_suite, test_pipeline_with_builtins)
 
 	syn_pipeline_destroy(pipe);
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: builtin stage-capacity paths inside the pipeline      */
+/* ------------------------------------------------------------------ */
+
+/* Custom stages exercise the generic 4x capacity fallback */
+static int custom_copy(const syn_tensor_t *in, syn_tensor_t *out,
+		       const void *config)
+{
+	ARG_UNUSED(config);
+
+	if (out->size < in->size) {
+		return -ENOMEM;
+	}
+	memcpy(out->data, in->data, in->size);
+	out->size = in->size;
+	out->dtype = in->dtype;
+	out->ndim = in->ndim;
+	memcpy(out->shape, in->shape, sizeof(out->shape));
+	return 0;
+}
+
+/* Keeps out->size at the offered capacity: each chained stage grows
+ * the next stage's 4x estimate until the arena refuses.
+ */
+static int grow_stage(const syn_tensor_t *in, syn_tensor_t *out,
+		      const void *config)
+{
+	ARG_UNUSED(in);
+	ARG_UNUSED(config);
+	memset(out->data, 0x5A, out->size);
+	out->dtype = SYN_NPU_DTYPE_INT8;
+	out->ndim = 1;
+	out->shape[0] = (uint32_t)out->size;
+	return 0;
+}
+
+ZTEST(syn_process_suite, test_pipeline_resize_dequant_topk_capacity)
+{
+	/* 2x2x3 in, 2x2 resize: the exact-size estimate (12) is below
+	 * the model input, so the engine raises it for the model feed.
+	 */
+	static uint8_t img[12];
+	static syn_resize_config_t rcfg = { .w = 2, .h = 2 };
+	static syn_dequantize_config_t dcfg = {
+		.scale = 1.0f / 127.0f, .zero_point = 0,
+	};
+	static syn_topk_config_t tcfg = { .k = 3 };
+
+	for (int i = 0; i < 12; i++) {
+		img[i] = (uint8_t)(i * 5);
+	}
+
+	syn_tensor_t input = {
+		.data = img, .size = sizeof(img),
+		.dtype = SYN_NPU_DTYPE_UINT8,
+		.ndim = 4, .shape = { 1, 2, 2, 3 },
+	};
+
+	syn_pipeline_t *pipe = syn_pipeline_create("cap_rzt");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_preprocess(
+			      pipe, syn_preprocess_image_resize, &rcfg), 0,
+		      "add resize failed");
+	zassert_equal(syn_pipeline_add_model(pipe, proc_model), 0,
+		      "add model failed");
+	zassert_equal(syn_pipeline_add_postprocess(
+			      pipe, syn_postprocess_dequantize, &dcfg), 0,
+		      "add dequantize failed");
+	zassert_equal(syn_pipeline_add_postprocess(
+			      pipe, syn_postprocess_top_k, &tcfg), 0,
+		      "add top_k failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &input, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_ok(syn_infer_wait(job, 2000), "wait failed");
+
+	syn_tensor_t result;
+
+	zassert_ok(syn_infer_get_result(job, &result), "get_result failed");
+	zassert_equal(result.size, 3 * sizeof(syn_classification_t),
+		      "top_k must emit 3 records");
+	syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_process_suite, test_pipeline_mfcc_capacity)
+{
+	static float samples[128];
+	static syn_mfcc_config_t mcfg = {
+		.sample_rate_hz = 8000,
+		.frame_len = 64,
+		.num_mel = 12,
+		.num_coeffs = 6,
+	};
+
+	for (int i = 0; i < 128; i++) {
+		samples[i] = (i < 64) ? 0.25f : 0.0f;
+	}
+
+	syn_tensor_t input = {
+		.data = samples, .size = sizeof(samples),
+		.dtype = SYN_NPU_DTYPE_FLOAT32,
+		.ndim = 2, .shape = { 1, 128 },
+	};
+
+	syn_pipeline_t *pipe = syn_pipeline_create("cap_mfcc");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_preprocess(
+			      pipe, syn_preprocess_audio_mfcc, &mcfg), 0,
+		      "add mfcc failed");
+	zassert_equal(syn_pipeline_add_model(pipe, proc_model), 0,
+		      "add model failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &input, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_ok(syn_infer_wait(job, 2000), "wait failed");
+
+	syn_tensor_t result;
+
+	zassert_ok(syn_infer_get_result(job, &result), "get_result failed");
+	syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_process_suite, test_pipeline_nms_rejects_model_bytes)
+{
+	/* NMS sized off the model output, then correctly refusing the
+	 * INT8 bytes: the job fails with the stage's -EINVAL.
+	 */
+	static uint8_t frame[48];
+	static syn_nms_config_t ncfg = {
+		.iou_threshold = 0.5f, .score_threshold = 0.1f,
+		.max_boxes = 4,
+	};
+
+	syn_tensor_t input = {
+		.data = frame, .size = sizeof(frame),
+		.dtype = SYN_NPU_DTYPE_INT8,
+		.ndim = 1, .shape = { 48 },
+	};
+
+	syn_pipeline_t *pipe = syn_pipeline_create("cap_nms");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_model(pipe, proc_model), 0,
+		      "add model failed");
+	zassert_equal(syn_pipeline_add_postprocess(
+			      pipe, syn_postprocess_nms, &ncfg), 0,
+		      "add nms failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &input, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_equal(syn_infer_wait(job, 2000), -EINVAL,
+		      "NMS on raw model bytes must fail");
+
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(job, &r), -EINVAL, "result");
+	syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_process_suite, test_pipeline_custom_stage_fallback)
+{
+	static uint8_t frame[48];
+
+	for (int i = 0; i < 48; i++) {
+		frame[i] = (uint8_t)(97 - i);
+	}
+
+	syn_tensor_t input = {
+		.data = frame, .size = sizeof(frame),
+		.dtype = SYN_NPU_DTYPE_INT8,
+		.ndim = 1, .shape = { 48 },
+	};
+
+	syn_pipeline_t *pipe = syn_pipeline_create("cap_custom");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_preprocess(pipe, custom_copy, NULL),
+		      0, "add custom pre failed");
+	zassert_equal(syn_pipeline_add_model(pipe, proc_model), 0,
+		      "add model failed");
+	zassert_equal(syn_pipeline_add_postprocess(pipe, custom_copy, NULL),
+		      0, "add custom post failed");
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &input, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_ok(syn_infer_wait(job, 2000), "wait failed");
+
+	syn_tensor_t result;
+
+	zassert_ok(syn_infer_get_result(job, &result), "get_result failed");
+	zassert_equal(result.size, 10, "passthrough must keep 10 bytes");
+	syn_pipeline_destroy(pipe);
+}
+
+ZTEST(syn_process_suite, test_pipeline_postprocess_arena_exhaustion)
+{
+	/* 10 -> 64 -> 256 -> 1024 -> 4096 -> 16384: the fifth grow
+	 * stage cannot be buffered by the 8 KB arena.
+	 */
+	static uint8_t frame[48];
+
+	syn_tensor_t input = {
+		.data = frame, .size = sizeof(frame),
+		.dtype = SYN_NPU_DTYPE_INT8,
+		.ndim = 1, .shape = { 48 },
+	};
+
+	syn_pipeline_t *pipe = syn_pipeline_create("cap_grow");
+
+	zassert_not_null(pipe, "create failed");
+	zassert_equal(syn_pipeline_add_model(pipe, proc_model), 0,
+		      "add model failed");
+	for (int i = 0; i < 5; i++) {
+		zassert_equal(syn_pipeline_add_postprocess(pipe, grow_stage,
+							   NULL),
+			      0, "add grow %d failed", i);
+	}
+	zassert_equal(syn_pipeline_build(pipe), 0, "build failed");
+
+	syn_job_id_t job = syn_infer_submit(pipe, &input, NULL);
+
+	zassert_not_equal(job, SYN_JOB_INVALID, "submit failed");
+	zassert_equal(syn_infer_wait(job, 2000), -ENOMEM,
+		      "stage buffer overflow must fail the job");
+
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(job, &r), -ENOMEM, "result");
+	syn_pipeline_destroy(pipe);
+}

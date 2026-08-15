@@ -18,7 +18,7 @@
   <a href="https://github.com/Dimitrios-Kafetzis/SynapticOS/releases"><img src="https://img.shields.io/github/v/release/Dimitrios-Kafetzis/SynapticOS?style=flat-square&color=blue" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-green?style=flat-square" alt="License"></a>
   <a href="#roadmap"><img src="https://img.shields.io/badge/phase-5%20of%206-orange?style=flat-square" alt="Phase"></a>
-  <a href="#test-suite"><img src="https://img.shields.io/badge/tests-158%20passed-brightgreen?style=flat-square" alt="Tests"></a>
+  <a href="#test-suite"><img src="https://img.shields.io/badge/tests-248%20passed-brightgreen?style=flat-square" alt="Tests"></a>
 </p>
 
 ---
@@ -142,7 +142,7 @@ west flash
 
 ```bash
 west twister -T synaptic-os/tests -p qemu_cortex_m3
-# 158 tests, 21 suites, 100% pass rate (two apps: tests/unit + tests/unit_store)
+# 248 tests, 25 suites, 100% pass rate (two apps: tests/unit + tests/unit_store)
 ```
 
 ## Build Footprint
@@ -176,8 +176,8 @@ synaptic-os/
 │   ├── dual_model/         Cross-core inference demo (CPU0 runtime + CPU1 remote client)
 │   └── ota_update/         End-to-end OTA-over-UART demo (factory -> update -> rollback)
 ├── tests/
-│   ├── unit/               133 unit tests across 18 suites
-│   └── unit_store/         25 store/OTA/hot-swap tests across 3 suites (RAM-emulated flash)
+│   ├── unit/               189 unit tests across 20 suites
+│   └── unit_store/         59 store/OTA/hot-swap/fault tests across 5 suites (RAM-emulated flash)
 ├── tools/                  syn_model_pack.py, syn_flash_layout.py, syn_ota_send.py,
 │                           syn_coverage.sh, profiler viz
 ├── boards/nxp/

@@ -748,3 +748,160 @@ ZTEST(syn_layer_preempt_suite, test_unregister_refused_while_suspended)
 	syn_pipeline_destroy(pr);
 	syn_mem_reset_ephemeral();
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: suspended-job teardown and layered output edges       */
+/* ------------------------------------------------------------------ */
+
+#include "syn_model_internal.h"
+
+/** Destroying a pipeline with a SUSPENDED job cancels the job and
+ *  releases its context slot.
+ */
+ZTEST(syn_layer_preempt_suite, test_destroy_pipe_with_suspended_job)
+{
+	syn_pipeline_t *pn = make_pipe("dsusp_n");
+	syn_pipeline_t *pr = make_pipe("dsusp_r");
+
+	syn_infer_params_t normal_params = {
+		.priority = SYN_PRIORITY_NORMAL,
+		.preemptible = true,
+	};
+	syn_job_id_t jn = syn_infer_submit(pn, &tensor_a, &normal_params);
+
+	zassert_not_equal(jn, SYN_JOB_INVALID, "NORMAL submit failed");
+	k_msleep(8);
+
+	syn_infer_params_t rt_params = {
+		.priority = SYN_PRIORITY_REALTIME,
+	};
+	syn_job_id_t jr = syn_infer_submit(pr, &tensor_b, &rt_params);
+
+	zassert_not_equal(jr, SYN_JOB_INVALID, "RT submit failed");
+
+	/* NORMAL sits SUSPENDED while RT runs */
+	k_msleep(10);
+	syn_pipeline_destroy(pn);
+
+	zassert_equal(syn_infer_wait(jn, 100), -ECANCELED,
+		      "suspended job must die with its pipeline");
+
+	syn_tensor_t r;
+
+	zassert_equal(syn_infer_get_result(jn, &r), -ECANCELED, "result n");
+	zassert_ok(syn_infer_wait(jr, 5000), "RT wait failed");
+	zassert_ok(syn_infer_get_result(jr, &r), "RT result failed");
+
+	syn_pipeline_destroy(pr);
+	syn_mem_reset_ephemeral();
+}
+
+/** Unload of a model with a SUSPENDED job is refused (-EBUSY), like
+ *  unregister: the parked context still references its payload.
+ */
+ZTEST(syn_layer_preempt_suite, test_unload_refused_while_suspended)
+{
+	syn_pipeline_t *pn = make_pipe("ususp_n");
+	syn_pipeline_t *pr = make_pipe("ususp_r");
+
+	syn_infer_params_t normal_params = {
+		.priority = SYN_PRIORITY_NORMAL,
+		.preemptible = true,
+	};
+	syn_job_id_t jn = syn_infer_submit(pn, &tensor_a, &normal_params);
+
+	zassert_not_equal(jn, SYN_JOB_INVALID, "NORMAL submit failed");
+	k_msleep(8);
+
+	syn_infer_params_t rt_params = {
+		.priority = SYN_PRIORITY_REALTIME,
+	};
+	syn_job_id_t jr = syn_infer_submit(pr, &tensor_b, &rt_params);
+
+	zassert_not_equal(jr, SYN_JOB_INVALID, "RT submit failed");
+	k_msleep(10);
+
+	zassert_equal(syn_model_unload(lp_model), -EBUSY,
+		      "unload must be refused while a job is suspended");
+
+	zassert_ok(syn_infer_wait(jr, 5000), "RT wait failed");
+	zassert_ok(syn_infer_wait(jn, 5000), "NORMAL wait failed");
+
+	syn_tensor_t r;
+
+	zassert_ok(syn_infer_get_result(jr, &r), "RT result failed");
+	zassert_ok(syn_infer_get_result(jn, &r), "NORMAL result failed");
+	zassert_true(syn_model_is_loaded(lp_model),
+		     "refused unload must leave the model loaded");
+
+	syn_pipeline_destroy(pn);
+	syn_pipeline_destroy(pr);
+	syn_mem_reset_ephemeral();
+}
+
+/** Layered completion with a declared output too big for the arena. */
+ZTEST(syn_layer_preempt_suite, test_layered_output_exceeds_arena)
+{
+	syn_model_info_t info = {0};
+	syn_model_handle_t h;
+
+	strncpy(info.name, "lay_big", sizeof(info.name) - 1);
+	info.input_size = LP_INPUT_SIZE;
+	info.output_size = 32768;
+	info.input_dtype = SYN_NPU_DTYPE_INT8;
+	info.output_dtype = SYN_NPU_DTYPE_INT8;
+	zassert_ok(syn_model_register(&info, &h), "register failed");
+	zassert_ok(syn_model_set_data(h, lp_blob, (size_t)lp_blob_size),
+		   "set_data failed");
+	zassert_ok(syn_model_load(h), "load failed");
+
+	int8_t out_buf[LP_OUTPUT_SIZE];
+	syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+	int ret = syn_infer_run_sync(h, &tensor_a, &out,
+				     SYN_PRIORITY_NORMAL);
+
+	zassert_equal(ret, -ENOMEM,
+		      "oversized layered output must fail: %d", ret);
+	zassert_ok(syn_model_unregister(h), "cleanup failed");
+	syn_mem_reset_ephemeral();
+}
+
+/** Layered output larger than the info-declared capacity: the copy
+ *  out of the session is refused rather than truncated.
+ */
+ZTEST(syn_layer_preempt_suite, test_layered_output_exceeds_declared)
+{
+	static uint8_t wide_blob[SYN_LAYERED_HDR_SIZE +
+				 2 * SYN_LAYERED_DESC_SIZE];
+	static const uint16_t wide_out[2] = { 64, 100 };
+	static const uint16_t wide_work[2] = { 0, 0 };
+
+	int size = syn_npu_layered_make_model(wide_blob, sizeof(wide_blob),
+					      LP_INPUT_SIZE, 2,
+					      wide_out, wide_work);
+
+	zassert_true(size > 0, "make_model failed: %d", size);
+
+	syn_model_info_t info = {0};
+	syn_model_handle_t h;
+
+	strncpy(info.name, "lay_wide", sizeof(info.name) - 1);
+	info.input_size = LP_INPUT_SIZE;
+	info.output_size = 4; /* stage capacity 64 < real output 100 */
+	info.input_dtype = SYN_NPU_DTYPE_INT8;
+	info.output_dtype = SYN_NPU_DTYPE_INT8;
+	zassert_ok(syn_model_register(&info, &h), "register failed");
+	zassert_ok(syn_model_set_data(h, wide_blob, (size_t)size),
+		   "set_data failed");
+	zassert_ok(syn_model_load(h), "load failed");
+
+	int8_t out_buf[LP_OUTPUT_SIZE];
+	syn_tensor_t out = { .data = out_buf, .size = sizeof(out_buf) };
+	int ret = syn_infer_run_sync(h, &tensor_a, &out,
+				     SYN_PRIORITY_NORMAL);
+
+	zassert_equal(ret, -ENOMEM,
+		      "under-declared layered output must fail: %d", ret);
+	zassert_ok(syn_model_unregister(h), "cleanup failed");
+	syn_mem_reset_ephemeral();
+}

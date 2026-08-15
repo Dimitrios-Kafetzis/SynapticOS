@@ -361,3 +361,123 @@ ZTEST(syn_ota_suite, test_staged_survives_reboot_then_activates)
     zassert_ok(syn_model_load(h));
     zassert_ok(syn_model_unload(h));
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: state-machine edges and status introspection          */
+/* ------------------------------------------------------------------ */
+
+/** Argument guards, status snapshots and the state-name table. */
+ZTEST(syn_ota_suite, test_status_and_state_names)
+{
+    ota_fresh();
+
+    /* argument guards */
+    zassert_equal(syn_ota_begin(NULL, 1024), -EINVAL, "NULL name");
+    zassert_equal(syn_ota_begin("", 1024), -EINVAL, "empty name");
+    zassert_equal(syn_ota_begin("m1", SYN_SYNM_HDR_SIZE), -EINVAL,
+                  "header-only size");
+    zassert_equal(syn_ota_write_chunk(NULL, 4), -EINVAL, "NULL chunk");
+
+    uint8_t junk[4] = {0};
+
+    zassert_equal(syn_ota_write_chunk(junk, 0), -EINVAL, "empty chunk");
+
+    /* store down: no session possible */
+    syn_store_deinit();
+    zassert_equal(syn_ota_begin("m1", 1024), -ENODEV,
+                  "session without a store");
+    zassert_ok(syn_store_init(&port, &lay), "re-init failed");
+
+    /* status is NULL-safe and reports a mid-session snapshot */
+    syn_ota_get_status(NULL);
+
+    uint32_t total = build_synm("m1", 40, 1024);
+
+    zassert_ok(syn_ota_begin("m1", total));
+    zassert_ok(stream_synm(512, 512));
+
+    syn_ota_status_t st;
+
+    syn_ota_get_status(&st);
+    zassert_equal(st.state, SYN_OTA_STATE_DOWNLOADING, "status state");
+    zassert_equal(st.total_size, total, "status total");
+    zassert_equal(st.received, 512, "status received");
+    zassert_not_equal(st.slot, SYN_STORE_SLOT_NONE, "status slot");
+
+    /* rollback is refused while a transfer is live */
+    zassert_equal(syn_ota_rollback(), -EBUSY,
+                  "rollback during a live session accepted");
+
+    /* the state-name table (incl. the catch-all) */
+    zassert_equal(strcmp(syn_ota_state_str(SYN_OTA_STATE_IDLE), "IDLE"),
+                  0, "IDLE name");
+    zassert_equal(strcmp(syn_ota_state_str(SYN_OTA_STATE_DOWNLOADING),
+                         "DOWNLOADING"), 0, "DOWNLOADING name");
+    zassert_equal(strcmp(syn_ota_state_str(SYN_OTA_STATE_VALIDATING),
+                         "VALIDATING"), 0, "VALIDATING name");
+    zassert_equal(strcmp(syn_ota_state_str(SYN_OTA_STATE_STAGING),
+                         "STAGING"), 0, "STAGING name");
+    zassert_equal(strcmp(syn_ota_state_str(SYN_OTA_STATE_READY),
+                         "READY"), 0, "READY name");
+    zassert_equal(strcmp(syn_ota_state_str(SYN_OTA_STATE_ERROR),
+                         "ERROR"), 0, "ERROR name");
+    zassert_equal(strcmp(syn_ota_state_str((syn_ota_state_t)99), "?"),
+                  0, "catch-all name");
+
+    syn_ota_reset();
+}
+
+/** A new begin() abandons a live session and supersedes a staged
+ *  predecessor; overshooting the announced size ends in ERROR.
+ */
+ZTEST(syn_ota_suite, test_begin_abandons_and_supersedes)
+{
+    ota_fresh();
+
+    /* leave a session mid-download, then begin again over it */
+    uint32_t total = build_synm("m1", 41, 1024);
+
+    zassert_ok(syn_ota_begin("m1", total));
+    zassert_ok(stream_synm(512, 512));
+    zassert_ok(syn_ota_begin("m1", total),
+               "begin over a live session failed");
+
+    /* run this second session to READY: predecessor fully replaced */
+    zassert_ok(stream_synm(total, 1024));
+    zassert_ok(syn_ota_finish());
+    zassert_equal(syn_store_staged_slot(), 0, "not staged");
+
+    /* a third begin supersedes the staged-but-unactivated record */
+    total = build_synm("m2", 42, 512);
+    zassert_ok(syn_ota_begin("m2", total),
+               "begin over a staged record failed");
+    zassert_equal(syn_store_staged_slot(), SYN_STORE_SLOT_NONE,
+                  "staged predecessor not cleared");
+
+    /* announced size is a hard ceiling */
+    zassert_ok(stream_synm(total, 512));
+    zassert_equal(syn_ota_write_chunk(synm_img, 64), -EFBIG,
+                  "overshoot accepted");
+    zassert_equal(syn_ota_get_state(), SYN_OTA_STATE_ERROR, "not ERROR");
+
+    syn_ota_reset();
+}
+
+/** A page-multiple image leaves nothing for the final flush: finish
+ *  validates and stages the empty-remainder case cleanly.
+ */
+ZTEST(syn_ota_suite, test_page_multiple_image)
+{
+    ota_fresh();
+
+    /* 64-byte header + 448 payload = 512 = 4 pages exactly */
+    uint32_t total = build_synm("m1", 43, 448);
+
+    zassert_equal(total % 256U, 0, "image must fill the page buffer");
+    zassert_ok(syn_ota_begin("m1", total));
+    zassert_ok(stream_synm(total, 256));
+    zassert_ok(syn_ota_finish(), "page-multiple finish failed");
+    zassert_ok(syn_ota_activate());
+    zassert_mem_equal(&flash_mem[lay.slot_off[0]], synm_img, total,
+                      "page-multiple image corrupted");
+}

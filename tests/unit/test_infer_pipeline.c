@@ -194,3 +194,55 @@ ZTEST(syn_pipeline_suite, test_invalid_args)
 	syn_pipeline_destroy(p);
 	syn_pipeline_destroy(NULL); /* Must not crash */
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 6 S13: construction edges                                    */
+/* ------------------------------------------------------------------ */
+
+ZTEST(syn_pipeline_suite, test_add_model_after_build)
+{
+	syn_pipeline_t *p = syn_pipeline_create("late_model");
+
+	zassert_not_null(p, "Create failed");
+	zassert_equal(syn_pipeline_add_model(p, test_model), 0,
+		      "add_model failed");
+	zassert_equal(syn_pipeline_build(p), 0, "build failed");
+	zassert_equal(syn_pipeline_add_model(p, test_model), -EPERM,
+		      "model added to a built pipeline");
+	syn_pipeline_destroy(p);
+}
+
+ZTEST(syn_pipeline_suite, test_add_model_into_full_table)
+{
+	syn_pipeline_t *p = syn_pipeline_create("full_table");
+
+	zassert_not_null(p, "Create failed");
+	for (int i = 0; i < CONFIG_SYNAPTIC_MAX_PIPELINE_STAGES; i++) {
+		zassert_equal(syn_pipeline_add_preprocess(p, passthrough,
+							  NULL),
+			      0, "pre %d failed", i);
+	}
+	zassert_equal(syn_pipeline_add_model(p, test_model), -ENOMEM,
+		      "model added to a full stage table");
+	syn_pipeline_destroy(p);
+}
+
+ZTEST(syn_pipeline_suite, test_build_after_model_unregistered)
+{
+	syn_model_info_t info = {0};
+	syn_model_handle_t h;
+
+	strncpy(info.name, "vanish", sizeof(info.name) - 1);
+	info.input_size = 16;
+	info.output_size = 4;
+	zassert_ok(syn_model_register(&info, &h), "register failed");
+
+	syn_pipeline_t *p = syn_pipeline_create("vanish");
+
+	zassert_not_null(p, "Create failed");
+	zassert_equal(syn_pipeline_add_model(p, h), 0, "add_model failed");
+	zassert_ok(syn_model_unregister(h), "unregister failed");
+	zassert_equal(syn_pipeline_build(p), -EINVAL,
+		      "build resolved a vanished model");
+	syn_pipeline_destroy(p);
+}
